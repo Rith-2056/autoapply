@@ -1,0 +1,20 @@
+# secrets
+.env
+
+# runtime data: applications db, cloned listings repo, screenshots, browser profile
+data/
+
+# resume (personal)
+resume/
+
+# logs
+logs/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/

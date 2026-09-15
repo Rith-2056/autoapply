@@ -1,0 +1,74 @@
+# Personal profile used to fill application forms.
+# Anything marked [FILL IN] must be completed before running for real.
+# Nothing here is ever sent anywhere except the job application form and the LLM
+# (as context for answering free-text questions).
+
+name:
+  first: Divyarith
+  last: Shivashok
+  full: Divyarith Shivashok
+  preferred: Divyarith
+
+contact:
+  email: divyariths@gmail.com
+  phone: "669-249-4174"
+  linkedin: https://linkedin.com/in/rithshiv
+  github: https://github.com/rithshiv
+  website: ""            # portfolio URL, optional
+
+address:
+  street: "[FILL IN]"
+  city: "[FILL IN]"
+  state: "[FILL IN]"     # e.g. MA
+  zip: "[FILL IN]"
+  country: United States
+  # Single-line version used when a form has one "Location" / "City" field
+  location: "[FILL IN]"  # e.g. "Amherst, MA"
+
+education:
+  school: University of Massachusetts Amherst
+  degree: Bachelor of Science
+  degree_short: "B.S."
+  major: Computer Science, Data Science and Statistics
+  gpa: "3.93"
+  gpa_scale: "4.0"
+  start_year: 2024
+  graduation_month: May
+  graduation_year: 2028
+  graduation: May 2028
+  level: Undergraduate      # current level of study
+  current_student: true
+
+work_authorization:
+  # e.g. "Yes, I am authorized to work in the United States"
+  authorized_us: "[FILL IN]"
+  # Yes / No — will you now or in the future require visa sponsorship?
+  requires_sponsorship: "[FILL IN]"
+  willing_to_relocate: "[FILL IN]"   # Yes / No
+  citizenship: "[FILL IN]"           # optional, e.g. "United States"
+
+eeo:
+  gender: Male
+  disability: "No, I do not have a disability"
+  veteran: "I am not a protected veteran"
+  race: "[FILL IN or Decline to self-identify]"
+  hispanic: "[FILL IN or Decline to self-identify]"
+
+preferences:
+  # How did you hear about us? (kept truthful)
+  how_did_you_hear: "SimplifyJobs GitHub internship list"
+  available_start: "May 2027"
+  # Desired term for internships
+  term: "Summer 2027"
+  over_18: "Yes"
+  previously_employed_here: "No"
+  # Leave empty to skip salary questions and mark them needs_manual
+  salary_expectation: ""
+  # Receive SMS / WhatsApp updates about applications? Yes / No
+  sms_opt_in: "No"
+  # Used for required "I acknowledge the privacy notice / I certify..." selects
+  consent: "Yes"
+
+resume:
+  pdf: ./resume/Divyarith_Resume.pdf
+  text: ./resume/resume.txt

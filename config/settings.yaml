@@ -1,0 +1,53 @@
+# Run behaviour and listing filters.
+
+listings:
+  repo_url: https://github.com/SimplifyJobs/Summer2027-Internships
+  branch: dev
+  local_path: ./data/listings_repo
+  json_path: .github/scripts/listings.json   # structured source; README.md is the fallback
+  term: "Summer 2027"
+
+filters:
+  # Listing categories to include. Valid values in listings.json:
+  #   Software, AI/ML/Data, Quant, Hardware, Product
+  categories: [Software, "AI/ML/Data", Quant]
+  # Optional: title must contain at least one of these (case-insensitive). Empty = any title.
+  title_keywords: []
+  # Titles containing any of these are skipped.
+  exclude_title_keywords: ["PhD", "MBA", "Master's", "Masters", "Graduate Student"]
+  # Location substrings to include (case-insensitive). Empty = any location.
+  # "Remote" matches remote roles.
+  locations: []
+  # Companies to never apply to (case-insensitive substring match on company name).
+  exclude_companies: []
+  # Skip listings whose sponsorship field is one of these.
+  exclude_sponsorship: ["U.S. Citizenship is Required"]
+  # If set, the listing's degree list must include this (or be empty). Empty string = don't check.
+  require_degree: "Bachelor's"
+  # Only attempt these ATS types. Others are recorded as needs_manual.
+  ats_allowlist: [greenhouse, lever, ashby, smartrecruiters, workday, generic]
+  # Hard cap per run (the --limit flag overrides this).
+  max_applications_per_run: 10
+
+run:
+  headless: false
+  # Optional: path to an existing Chrome/Chromium binary. Leave empty to use the
+  # browser installed by `playwright install chromium`.
+  chromium_executable: ""
+  # Random delay between applications, in seconds.
+  delay_min_seconds: 20
+  delay_max_seconds: 60
+  # Per-page timeout in ms.
+  page_timeout_ms: 45000
+  screenshots_dir: ./data/screenshots
+  browser_profile_dir: ./data/browser_profile
+  database: ./data/applications.db
+  logs_dir: ./logs
+
+llm:
+  provider: anthropic
+  model: claude-opus-5
+  # Only accept an LLM answer at this confidence or higher: low | medium | high
+  min_confidence: high
+  # Max characters of resume text to include as context.
+  max_resume_chars: 12000
