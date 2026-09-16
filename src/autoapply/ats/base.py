@@ -14,18 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Profile
-from ..fields import (
-    choose_consent,
-    choose_month,
-    choose_numeric_range,
-    choose_option,
-    clean_label,
-    match_rule,
-    profile_value,
-    should_skip,
-)
+from ..fields import choose_option, clean_label
 from ..listings import Listing
 from ..llm import QuestionAnswerer
+from ..planner import Decision, Planner, Question
 
 log = logging.getLogger("autoapply.ats")
 
@@ -47,15 +39,34 @@ class HandlerError(Exception):
 class FieldAnswer:
     label: str
     value: str
-    source: str  # profile | llm | resume | skipped | manual
+    source: str  # profile | inferred | draft | resume | prefilled | needs_user | user | n/a
     kind: str = "text"
     required: bool = False
+    status: str = "filled"  # filled | draft | needs_user | n/a
+    category: str = ""
+    reason: str = ""
+    field_id: str = ""
+
+
+@dataclass
+class PendingQuestion:
+    """A question the tool could not (or must not) answer on its own."""
+
+    field_id: str
+    label: str
+    kind: str = "text"
+    options: list[str] | None = None
+    required: bool = False
+    category: str = ""
+    reason: str = ""
+    draft: str = ""  # a personalized draft awaiting approval, if any
 
 
 @dataclass
 class FillResult:
     answers: list[FieldAnswer] = field(default_factory=list)
-    unanswered: list[str] = field(default_factory=list)  # required questions left blank
+    pending: list[PendingQuestion] = field(default_factory=list)
+    unanswered: list[str] = field(default_factory=list)  # labels of required pending questions
     resume_uploaded: bool = False
 
 
@@ -161,6 +172,11 @@ class BaseHandler:
         self.profile = ctx.profile
         self.llm = ctx.llm
         self.listing: Listing | None = None
+        self._fields: dict[str, dict[str, Any]] = {}
+        self._questions: dict[str, Question] = {}
+        self._job_text: str = ""
+        self._research: str = ""
+        self._job_context = None
 
     # ------------------------------------------------------------------ #
     # Steps overridden by concrete handlers
@@ -170,6 +186,13 @@ class BaseHandler:
         """Navigate to the application form."""
         self.listing = listing
         self.goto(listing.url)
+
+    def prepare_context(self, research: bool = True) -> None:
+        """Capture the job text and (optionally) research the company for drafts."""
+        self.capture_job_text()
+        if research and self.listing and self.llm.enabled:
+            self._research = self.llm.research_company(self.listing.company, self.listing.title, self._job_text, self.listing.url)
+        self._job_context = None
 
     def fill(self) -> FillResult:
         return self.fill_generic()
@@ -259,100 +282,250 @@ class BaseHandler:
         return self.page.locator(f'[data-aa-id="{aa_id}"]').first
 
     # ------------------------------------------------------------------ #
-    # Generic filling
+    # Generic filling: enumerate -> plan (profile rules + one LLM batch) -> apply
     # ------------------------------------------------------------------ #
 
     def fill_generic(self, scope_note: str = "") -> FillResult:
         result = FillResult()
         fields = self.enumerate_fields()
         log.info("Found %d form controls%s", len(fields), f" ({scope_note})" if scope_note else "")
+        self._fields.update({f["id"]: f for f in fields})
+
+        questions: list[Question] = []
         for f in fields:
             try:
-                self._fill_one(f, result)
-            except NeedsManual:
-                raise
+                ftype = f["type"]
+                label = clean_label(f.get("label", "")) or f.get("name", "")
+                required = bool(f.get("required"))
+                if ftype == "file":
+                    self._handle_file(f, label, required, result)
+                    continue
+                if ftype == "checkbox":
+                    self._handle_single_checkbox(f, label, required, result)
+                    continue
+                if f.get("value") and ftype not in ("textarea", "select") and not f.get("combobox"):
+                    result.answers.append(FieldAnswer(label, f["value"], "prefilled", ftype, required, status="filled", field_id=f["id"]))
+                    continue
+                q = self._question_from_field(f, label, required)
+                questions.append(q)
+                self._questions[q.id] = q
             except Exception as e:  # noqa: BLE001
                 log.warning("Field %r: %s", f.get("label"), e)
-                if f.get("required"):
-                    result.unanswered.append(f"{clean_label(f.get('label', ''))} (error: {e})")
+
+        planner = Planner(self.profile, self.llm, self.job_context())
+        decisions = planner.plan(questions)
+        for d in decisions:
+            self._apply_decision(d, result)
+        result.unanswered = [p.label for p in result.pending if p.required]
         return result
 
-    # -- individual field ------------------------------------------------ #
+    def job_context(self):
+        from ..llm import JobContext
 
-    def _fill_one(self, f: dict[str, Any], result: FillResult) -> None:
+        if self._job_context is None:
+            self._job_context = JobContext(
+                company=self.listing.company if self.listing else "",
+                role=self.listing.title if self.listing else "",
+                url=self.listing.url if self.listing else "",
+                job_text=self._job_text,
+                research=self._research,
+            )
+        return self._job_context
+
+    def capture_job_text(self, max_chars: int = 12000) -> str:
+        """Grab the visible job description text (used as LLM context)."""
+        try:
+            self._job_text = (self.page.locator("body").inner_text(timeout=5000) or "")[:max_chars]
+        except Exception:  # noqa: BLE001
+            self._job_text = ""
+        return self._job_text
+
+    def _question_from_field(self, f: dict[str, Any], label: str, required: bool) -> Question:
         ftype = f["type"]
-        label = clean_label(f.get("label", "")) or f.get("name", "")
-        required = bool(f.get("required"))
-
-        if ftype == "file":
-            self._handle_file(f, label, required, result)
-            return
-        if ftype == "checkbox":
-            self._handle_single_checkbox(f, label, required, result)
-            return
-        if should_skip(label):
-            if required:
-                result.unanswered.append(label)
-            result.answers.append(FieldAnswer(label, "", "skipped", ftype, required))
-            return
-
-        options: list[str] | None = f.get("options")
+        options: list[str] | None = None
+        kind = ftype
         if ftype in ("radio", "checkbox_group"):
-            self._handle_group(f, label, required, result)
+            options = [clean_label(o) for o in f.get("options", [])]
+        elif ftype == "select":
+            options = list(f.get("options") or [])
+        elif ftype == "custom_select" or f.get("combobox"):
+            kind = "combobox"
+            options = self._peek_combobox_options(f)
+        return Question(
+            id=f["id"],
+            label=label,
+            kind=kind,
+            options=options or None,
+            required=required,
+            maxlength=f.get("maxlength"),
+            name=f.get("name", ""),
+            multi=(ftype == "checkbox_group"),
+            option_ids=f.get("optionIds"),
+        )
+
+    def _peek_combobox_options(self, f: dict[str, Any]) -> list[str]:
+        """Open a custom dropdown just to read its options, then close it."""
+        try:
+            el = self.loc(f["id"])
+            self._open_combobox(el)
+            self._wait_options_loaded(timeout_ms=2500)
+            opts = self._read_open_options()
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(150)
+            # Long async lists (schools, countries) are searched by typing later; don't
+            # constrain the planner to whatever the first page of options was.
+            return opts if 0 < len(opts) <= 60 else []
+        except Exception as e:  # noqa: BLE001
+            log.debug("peek options failed for %r: %s", f.get("label"), e)
+            return []
+
+    def _apply_decision(self, d: Decision, result: FillResult) -> None:
+        q = d.question
+        if d.status == "n/a":
+            result.answers.append(FieldAnswer(q.label, "", "n/a", q.kind, q.required, status="n/a", category=d.category, reason=d.reason, field_id=q.id))
             return
-        if ftype == "select":
-            self._handle_select(f, label, required, options or [], result)
+        if d.status == "needs_user":
+            result.pending.append(PendingQuestion(q.id, q.label, q.kind, q.options, q.required, d.category, d.reason))
+            result.answers.append(FieldAnswer(q.label, "", "needs_user", q.kind, q.required, status="needs_user", category=d.category, reason=d.reason, field_id=q.id))
             return
-        if ftype == "custom_select" or f.get("combobox"):
-            self._handle_combobox(f, label, required, result)
+        ok, msg = self.apply_answer(q.id, d.value)
+        if not ok:
+            reason = f"could not enter the answer ({msg}); please set it yourself"
+            result.pending.append(PendingQuestion(q.id, q.label, q.kind, q.options, q.required, d.category, reason, draft=d.value))
+            result.answers.append(FieldAnswer(q.label, d.value, "needs_user", q.kind, q.required, status="needs_user", category=d.category, reason=reason, field_id=q.id))
             return
-        self._handle_text(f, label, required, result)
+        if d.status == "draft":
+            result.pending.append(PendingQuestion(q.id, q.label, q.kind, q.options, q.required, d.category, d.reason, draft=d.value))
+            result.answers.append(FieldAnswer(q.label, d.value, "draft", q.kind, q.required, status="draft", category=d.category, reason=d.reason, field_id=q.id))
+            return
+        result.answers.append(FieldAnswer(q.label, d.value, d.source, q.kind, q.required, status="filled", category=d.category, reason=d.reason, field_id=q.id))
+
+    # ------------------------------------------------------------------ #
+    # Applying a value to a specific field (also used by the voice/typed resolver)
+    # ------------------------------------------------------------------ #
+
+    def apply_answer(self, field_id: str, value: str) -> tuple[bool, str]:
+        """Put ``value`` into the field with this id. Returns (ok, message)."""
+        q = self._questions.get(field_id)
+        if q is None:
+            f = self._fields.get(field_id)
+            if f and f.get("type") == "checkbox":
+                try:
+                    box = self.loc(field_id)
+                    if value.strip().lower() in ("checked", "yes", "true", "check", "on"):
+                        box.check(force=True)
+                    else:
+                        box.uncheck(force=True)
+                    return True, "ok"
+                except Exception as e:  # noqa: BLE001
+                    return False, f"{type(e).__name__}: {e}"
+            return False, f"unknown field id {field_id}"
+        try:
+            if q.kind in ("radio", "checkbox_group"):
+                return self._apply_group(q, value)
+            if q.kind == "select":
+                return self._apply_select(q, value)
+            if q.kind == "combobox":
+                return self._apply_combobox(q, value)
+            return self._apply_text(q, value)
+        except Exception as e:  # noqa: BLE001
+            return False, f"{type(e).__name__}: {e}"
+
+    def _apply_text(self, q: Question, value: str) -> tuple[bool, str]:
+        el = self.loc(q.id)
+        el.fill(value)
+        if self._fields.get(q.id, {}).get("combobox"):
+            self.page.wait_for_timeout(800)
+            self._pick_open_option(value, loose=True)
+            return True, "ok"
+        try:
+            actual = el.input_value(timeout=1000)
+        except Exception:  # noqa: BLE001
+            actual = value
+        if actual.strip() != value.strip():
+            return False, f"value did not stick (field shows {actual[:40]!r})"
+        return True, "ok"
+
+    def _apply_select(self, q: Question, value: str) -> tuple[bool, str]:
+        options = q.options or []
+        chosen = value if value in options else choose_option(options, value, "select")
+        if not chosen:
+            return False, f"{value!r} is not an option"
+        self.loc(q.id).select_option(label=chosen)
+        return True, "ok"
+
+    def _apply_group(self, q: Question, value: str) -> tuple[bool, str]:
+        options = q.options or []
+        ids = q.option_ids or []
+        wanted = [v.strip() for v in value.split("||")] if q.multi else [value.strip()]
+        picked = 0
+        for w in wanted:
+            chosen = w if w in options else choose_option(options, w, "select")
+            if not chosen:
+                return False, f"{w!r} is not an option"
+            idx = options.index(chosen)
+            if idx < len(ids):
+                self.loc(ids[idx]).check(force=True)
+                picked += 1
+        return (picked > 0), "ok" if picked else "nothing selected"
+
+    def _apply_combobox(self, q: Question, value: str) -> tuple[bool, str]:
+        el = self.loc(q.id)
+        self._open_combobox(el)
+        picked = self._pick_open_option(value)
+        if not picked:
+            # Type to filter (typing, not fill, so the widget's key handlers fire), then pick.
+            try:
+                el.click()
+            except Exception:  # noqa: BLE001
+                el.focus()
+            self.page.keyboard.type(value[:60], delay=20)
+            self._wait_options_loaded()
+            picked = self._pick_open_option(value) or self._pick_open_option(value, loose=True)
+            if not picked and len(value.split()) > 2:
+                try:
+                    el.fill("")
+                except Exception:  # noqa: BLE001
+                    pass
+                self.page.keyboard.type(" ".join(value.split()[:3]), delay=20)
+                self._wait_options_loaded()
+                picked = self._pick_open_option(value) or self._pick_open_option(value, loose=True)
+            if not picked:
+                # react-select and most autocompletes select the highlighted (first) match on Enter.
+                self.page.keyboard.press("Enter")
+                self.page.wait_for_timeout(500)
+                picked = self._combobox_shows(el, value)
+        else:
+            picked = self._combobox_shows(el, value) or picked
+        if not picked:
+            self.page.keyboard.press("Escape")
+            return False, "could not select that option"
+        return True, "ok"
 
     def _handle_file(self, f: dict[str, Any], label: str, required: bool, result: FillResult) -> None:
         if re.search(r"cover", label, re.I) or re.search(r"cover", f.get("name", ""), re.I):
-            result.answers.append(FieldAnswer(label or "Cover letter", "", "skipped", "file", required))
+            status = "needs_user" if required else "n/a"
+            result.answers.append(FieldAnswer(label or "Cover letter", "", status, "file", required, status=status, category="long_form", reason="cover letter upload is yours to provide", field_id=f["id"]))
             if required:
-                result.unanswered.append(f"{label or 'Cover letter'} (file upload)")
+                result.pending.append(PendingQuestion(f["id"], label or "Cover letter", "file", None, True, "long_form", "cover letter file must be attached by you"))
             return
         if result.resume_uploaded and not re.search(r"resume|cv", label + f.get("name", ""), re.I):
             return
         self.loc(f["id"]).set_input_files(str(self.ctx.resume_pdf))
         self.page.wait_for_timeout(1500)
         result.resume_uploaded = True
-        result.answers.append(FieldAnswer(label or "Resume", self.ctx.resume_pdf.name, "resume", "file", required))
+        result.answers.append(FieldAnswer(label or "Resume", self.ctx.resume_pdf.name, "resume", "file", required, status="filled", category="personal_info", field_id=f["id"]))
 
     def _handle_single_checkbox(self, f: dict[str, Any], label: str, required: bool, result: FillResult) -> None:
         # Consent / acknowledgement boxes are checked when required; marketing opt-ins are left alone.
         if re.search(r"agree|consent|acknowledge|certify|confirm|accept|privacy|terms|accurate|true", label, re.I):
             if required and not f.get("checked"):
                 self.loc(f["id"]).check()
-                result.answers.append(FieldAnswer(label, "checked", "profile", "checkbox", required))
+                result.answers.append(FieldAnswer(label, "checked", "profile", "checkbox", required, status="filled", category="consent", field_id=f["id"]))
             return
         if required and not f.get("checked"):
-            result.unanswered.append(label)
-            result.answers.append(FieldAnswer(label, "", "skipped", "checkbox", required))
-
-    def _handle_group(self, f: dict[str, Any], label: str, required: bool, result: FillResult) -> None:
-        options = [clean_label(o) for o in f.get("options", [])]
-        value, source = self._decide(label, options, required, kind_hint="group")
-        if value is None:
-            if required:
-                result.unanswered.append(label)
-            result.answers.append(FieldAnswer(label, "", "skipped", f["type"], required))
-            return
-        idx = options.index(value)
-        self.loc(f["optionIds"][idx]).check(force=True)
-        result.answers.append(FieldAnswer(label, value, source, f["type"], required))
-
-    def _handle_select(self, f: dict[str, Any], label: str, required: bool, options: list[str], result: FillResult) -> None:
-        value, source = self._decide(label, options, required, kind_hint="select")
-        if value is None:
-            if required:
-                result.unanswered.append(label)
-            result.answers.append(FieldAnswer(label, "", "skipped", "select", required))
-            return
-        self.loc(f["id"]).select_option(label=value)
-        result.answers.append(FieldAnswer(label, value, source, "select", required))
+            result.pending.append(PendingQuestion(f["id"], label, "checkbox", ["checked", "unchecked"], True, "other", "required checkbox; please decide"))
+            result.answers.append(FieldAnswer(label, "", "needs_user", "checkbox", required, status="needs_user", category="other", field_id=f["id"]))
 
     OPTION_SELECTOR = (
         "[role=option]:visible, [role=listbox] li:visible, [role=listbox] [role=treeitem]:visible, "
@@ -401,53 +574,6 @@ class BaseHandler:
         except Exception:  # noqa: BLE001
             return False
 
-    def _handle_combobox(self, f: dict[str, Any], label: str, required: bool, result: FillResult) -> None:
-        el = self.loc(f["id"])
-        self._open_combobox(el)
-        options = self._read_open_options()
-        value, source = self._decide(label, options or None, required, kind_hint="select")
-        if value is None:
-            self.page.keyboard.press("Escape")
-            if required:
-                result.unanswered.append(label)
-            result.answers.append(FieldAnswer(label, "", "skipped", "combobox", required))
-            return
-        picked = self._pick_open_option(value)
-        if not picked:
-            # Type to filter (typing, not fill, so the widget's key handlers fire), then pick.
-            try:
-                el.click()
-            except Exception:  # noqa: BLE001
-                el.focus()
-            self.page.keyboard.type(value[:60], delay=20)
-            # Async lists (schools, locations) can take a moment to load.
-            self._wait_options_loaded()
-            picked = self._pick_open_option(value) or self._pick_open_option(value, loose=True)
-            if not picked and len(value.split()) > 2:
-                # Long names (schools) often match better on a shorter prefix.
-                try:
-                    el.fill("")
-                except Exception:  # noqa: BLE001
-                    pass
-                self.page.keyboard.type(" ".join(value.split()[:3]), delay=20)
-                self._wait_options_loaded()
-                picked = self._pick_open_option(value) or self._pick_open_option(value, loose=True)
-            if not picked:
-                # react-select and most autocompletes select the highlighted (first) match on Enter.
-                self.page.keyboard.press("Enter")
-                self.page.wait_for_timeout(500)
-                picked = self._combobox_shows(el, value)
-        else:
-            picked = self._combobox_shows(el, value) or picked
-        if not picked:
-            self.page.keyboard.press("Escape")
-            log.warning("Could not select %r for %r", value, label)
-            if required:
-                result.unanswered.append(f"{label} (could not select '{value}')")
-            result.answers.append(FieldAnswer(label, "", "skipped", "combobox", required))
-            return
-        result.answers.append(FieldAnswer(label, value, source, "combobox", required))
-
     def _combobox_shows(self, el, value: str) -> bool:
         """True if the widget now displays ``value`` (or its first words) as selected."""
         try:
@@ -487,92 +613,3 @@ class BaseHandler:
             pass
         return False
 
-    def _handle_text(self, f: dict[str, Any], label: str, required: bool, result: FillResult) -> None:
-        if f.get("value") and f["type"] != "textarea":
-            # Already prefilled (e.g. autofill); leave it.
-            result.answers.append(FieldAnswer(label, f["value"], "prefilled", f["type"], required))
-            return
-        value, source = self._decide(label, None, required, kind_hint=f["type"], maxlength=f.get("maxlength"))
-        if value is None:
-            if required:
-                result.unanswered.append(label)
-            result.answers.append(FieldAnswer(label, "", "skipped", f["type"], required))
-            return
-        el = self.loc(f["id"])
-        el.fill(value)
-        # Autocomplete inputs (e.g. location) show suggestions; accept the first one.
-        if f.get("combobox"):
-            self.page.wait_for_timeout(800)
-            self._pick_open_option(value, loose=True)
-        try:
-            actual = el.input_value(timeout=1000)
-        except Exception:  # noqa: BLE001
-            actual = value
-        if actual.strip() != value.strip() and not f.get("combobox"):
-            log.warning("Field %r did not keep value %r (now %r)", label, value, actual)
-            if required:
-                result.unanswered.append(f"{label} (value did not stick)")
-            result.answers.append(FieldAnswer(label, actual, "skipped", f["type"], required))
-            return
-        result.answers.append(FieldAnswer(label, value, source, f["type"], required))
-
-    # -- decide a value for a label ------------------------------------ #
-
-    def _decide(
-        self,
-        label: str,
-        options: list[str] | None,
-        required: bool,
-        kind_hint: str = "text",
-        maxlength: int | None = None,
-    ) -> tuple[str | None, str]:
-        """Return (value, source). value None means leave blank."""
-        rule = match_rule(label)
-        if rule:
-            pv = profile_value(self.profile, rule)
-            if pv:
-                if options:
-                    if rule.kind == "date_month":
-                        chosen = choose_month(options, pv)
-                    elif rule.kind == "date_year":
-                        chosen = next((o for o in options if pv in o), None)
-                    elif rule.kind == "consent":
-                        chosen = choose_consent(options)
-                    else:
-                        chosen = choose_option(options, pv, rule.kind)
-                        if not chosen and rule.path == "education.gpa":
-                            chosen = choose_numeric_range(options, pv)
-                    if chosen:
-                        return chosen, "profile"
-                else:
-                    if rule.kind == "yesno" and kind_hint == "text":
-                        return pv, "profile"
-                    return pv, "profile"
-            elif rule.path.startswith(("eeo.", "work_authorization.")) and options:
-                # Unfilled EEO answer: prefer a decline option rather than guessing.
-                decline = choose_option(options, "decline", "select") or choose_option(options, "prefer not", "select")
-                if decline and not required:
-                    return None, "skipped"
-                if decline:
-                    return decline, "profile"
-            # Known field but profile has no usable value -> never guess.
-            if required:
-                return None, "skipped"
-            return None, "skipped"
-
-        # Unknown question: only ask the LLM when it is required, or when it's a
-        # free-text question worth answering (optional selects are left blank).
-        if not required and options:
-            return None, "skipped"
-        if not self.llm.enabled:
-            return None, "skipped"
-        ans = self.llm.answer(
-            label,
-            options=options,
-            company=self.listing.company if self.listing else "",
-            role=self.listing.title if self.listing else "",
-            max_length=maxlength,
-        )
-        if ans.acceptable(self.llm.min_confidence):
-            return ans.answer, "llm"
-        return None, "skipped"

@@ -41,9 +41,13 @@ RULES: list[Rule] = [
     Rule(_r(r"\b(school|university|college|institution|alma mater)\b"), "education.school", "select"),
     Rule(_r(r"\b(major|field of study|discipline|concentration|area of study)\b"), "education.major", "select"),
     Rule(_r(r"\bgpa\b|\bgrade point\b"), "education.gpa"),
+    Rule(_r(r"\b(end|completion) date\b.*\bmonth\b|\bmonth\b.*\b(end|completion) date\b"), "education.graduation_month", "date_month"),
+    Rule(_r(r"\b(end|completion) date\b.*\byear\b|\byear\b.*\b(end|completion) date\b"), "education.graduation_year", "date_year"),
+    Rule(_r(r"\bstart date\b.*\bmonth\b|\bmonth\b.*\bstart date\b|\b(school|education|program) start\b.*\bmonth\b"), "education.start_month", "date_month"),
+    Rule(_r(r"\bstart date\b.*\byear\b|\byear\b.*\bstart date\b|\b(school|education|program) start\b.*\byear\b"), "education.start_year", "date_year"),
     Rule(_r(r"\bgraduat\w*\b.*\bmonth\b|\bmonth\b.*\bgraduat"), "education.graduation_month", "date_month"),
     Rule(_r(r"\bgraduat\w*\b.*\byear\b|\byear\b.*\bgraduat|\bclass of\b"), "education.graduation_year", "date_year"),
-    Rule(_r(r"\bgraduat"), "education.graduation"),
+    Rule(_r(r"\bgraduat"), "education.graduation", "graduation"),
     Rule(_r(r"\b(degree|education level|level of education|highest level)\b"), "education.degree", "select"),
     Rule(_r(r"\b(current (year|level)|year in school|academic (year|level|standing)|class year|student status)\b"), "education.level", "select"),
     Rule(_r(r"\b(street|address line|address 1|home address|mailing address)\b"), "address.street"),
@@ -51,11 +55,16 @@ RULES: list[Rule] = [
     Rule(_r(r"\b(state|province|region)\b"), "address.state", "select"),
     Rule(_r(r"\bcountry\b"), "address.country", "select"),
     Rule(_r(r"\b(city|current location|location|where (are you|do you) (based|located|live))\b"), "address.location"),
-    Rule(_r(r"\b(sponsor|visa|immigration|h-?1b|opt\b|cpt\b)"), "work_authorization.requires_sponsorship", "yesno"),
+    # Only actual sponsorship questions. OPT/CPT/H-1B status questions are not the
+    # same fact and go to the strict LLM policy (usually: ask the user).
+    Rule(_r(r"\b(sponsor\w*|employment visa|work visa|visa (status|sponsorship))\b"), "work_authorization.requires_sponsorship", "yesno"),
     Rule(_r(r"\b(authori[sz]ed|eligible|legally|permitted|right) to work\b|\bwork authori[sz]ation\b|\bwork permit\b"), "work_authorization.authorized_us", "yesno"),
     Rule(_r(r"\bcitizen"), "work_authorization.citizenship", "select"),
-    Rule(_r(r"\brelocat"), "work_authorization.willing_to_relocate", "yesno"),
+    Rule(_r(r"\brelocat|\bwilling to work (from|in|at) (the |our )?(office|on-?site|in-?person)|\bwork (on-?site|in-?person|from the office)\b"), "work_authorization.willing_to_relocate", "yesno"),
+    Rule(_r(r"\btransgender\b"), "eeo.transgender", "select"),
+    Rule(_r(r"\bsexual orientation\b"), "eeo.sexual_orientation", "select"),
     Rule(_r(r"\b(gender|sex)\b"), "eeo.gender", "select"),
+    Rule(_r(r"\bpronoun"), "eeo.pronouns", "select"),
     Rule(_r(r"\b(hispanic|latin[oax])\b"), "eeo.hispanic", "select"),
     Rule(_r(r"\b(race|ethnic)"), "eeo.race", "select"),
     Rule(_r(r"\bveteran\b|\bmilitary\b"), "eeo.veteran", "select"),
@@ -70,13 +79,12 @@ RULES: list[Rule] = [
     Rule(_r(r"\b(term|season|semester|which (summer|internship))\b.*\b(apply|interest|prefer|available)\b|\binternship term\b"), "preferences.term", "select"),
 ]
 
+# Fields that are not questions for the candidate at all (never asked, shown as n/a).
 SKIP_PATTERNS = [
     _r(r"\bcover letter\b"),
-    _r(r"\bpronoun"),
-    _r(r"\bmiddle name\b"),
     _r(r"\bpassword\b"),
-    _r(r"\bconfirm (e-?mail|password)\b"),
     _r(r"\bpromo|\bcoupon"),
+    _r(r"\bsearch\b"),
 ]
 
 YES_WORDS = re.compile(r"^(yes|y|true)\b", re.I)
@@ -117,6 +125,8 @@ def match_rule(label: str) -> Rule | None:
         if rule.pattern.search(lbl):
             if rule.path in _IDENTITY_PATHS and (len(lbl) > 45 or "?" in lbl):
                 continue
+            if rule.path == "contact.email" and re.search(r"\b(alternate|alternative|secondary|other|additional)\b", lbl, re.I):
+                return None
             if rule.path == "work_authorization.authorized_us" and _NON_US_RE.search(lbl) and not _US_RE.search(lbl):
                 # Authorization for another country: profile can't answer it.
                 return None
@@ -240,4 +250,29 @@ def choose_consent(options: list[str]) -> str | None:
         pick = choose_option(options, v, "select")
         if pick and not re.search(r"\b(no|not|decline|disagree)\b", pick, re.I):
             return pick
+    return None
+
+
+_SEASON_FOR_MONTH = {"january": "winter", "february": "winter", "march": "spring", "april": "spring", "may": "spring",
+                     "june": "summer", "july": "summer", "august": "summer", "september": "fall", "october": "fall",
+                     "november": "fall", "december": "winter"}
+
+
+def choose_graduation(options: list[str], month: str, year: str | int) -> str | None:
+    """Pick a graduation option like 'Spring 2028', 'May 2028', '2028', '2027-2028'."""
+    y = str(year).strip()
+    m = (month or "").strip().lower()
+    if not y:
+        return None
+    with_year = [o for o in options if y in o]
+    if not with_year:
+        return None
+    if len(with_year) == 1:
+        return with_year[0]
+    if m:
+        season = _SEASON_FOR_MONTH.get(m, "")
+        for o in with_year:
+            ol = o.lower()
+            if m in ol or m[:3] in ol.split() or (season and season in ol):
+                return o
     return None

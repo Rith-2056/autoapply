@@ -47,7 +47,23 @@ run:
 llm:
   provider: anthropic
   model: claude-opus-5
-  # Only accept an LLM answer at this confidence or higher: low | medium | high
-  min_confidence: high
+  # Only accept an inferred answer at this confidence or higher: low | medium | high
+  # ("medium" allows reasonable inference from the resume; "high" = explicit facts only)
+  min_confidence: medium
   # Max characters of resume text to include as context.
   max_resume_chars: 12000
+  # Research the company/role with web search before drafting "why us" answers.
+  web_research: true
+  research_cache_dir: ./data/research
+  # Max characters of the job page text passed as context.
+  max_job_text_chars: 8000
+
+voice:
+  # Enable with `autoapply run --voice`. Requires: pip install -e ".[voice]"
+  tts: auto            # auto | pyttsx3 | say (macOS) | off
+  stt: faster_whisper  # faster_whisper | off
+  whisper_model: base.en
+  language: en
+  max_record_seconds: 90
+  silence_seconds: 2.5
+  sample_rate: 16000

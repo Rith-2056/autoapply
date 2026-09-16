@@ -88,8 +88,13 @@ if options:
         if isinstance(ans, str):
             ans = json.loads(ans or "[]")
         if ans:
-            st.markdown("**Answers filled:**")
-            st.dataframe(pd.DataFrame(ans), use_container_width=True, hide_index=True)
+            adf = pd.DataFrame(ans)
+            cols = [c for c in ("status", "label", "value", "source", "category", "reason", "required") if c in adf.columns]
+            need = adf[adf.get("status", "") == "needs_user"] if "status" in adf.columns else adf.iloc[0:0]
+            if len(need):
+                st.error(f"{len(need)} field(s) still need you")
+            st.markdown("**All fields:**")
+            st.dataframe(adf[cols], use_container_width=True, hide_index=True)
     with right:
         sp = row["screenshot_path"]
         if sp and Path(sp).exists():

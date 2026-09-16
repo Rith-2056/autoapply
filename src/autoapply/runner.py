@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +14,12 @@ from rich.prompt import Prompt
 from .ats import detect_ats, get_handler_class
 from .ats.base import ApplyContext, FillResult, HandlerError, NeedsManual
 from .browser import captcha_present, launch, screenshot
-from .config import Profile, Secrets, Settings
+from .config import Profile, Secrets, Settings, resolve_path
 from .db import ApplicationRecord, Database
 from .listings import Listing, ListingFilters, filter_listings, load_listings, sync_repo
 from .llm import QuestionAnswerer
 from .report import console, print_answers, print_records
+from .resolve import QuestionResolver
 
 log = logging.getLogger("autoapply.runner")
 
@@ -33,6 +34,7 @@ class RunOptions:
     no_sync: bool = False
     ats_only: list[str] = field(default_factory=list)
     company: str | None = None  # only listings whose company matches
+    voice: bool = False  # read unresolved questions aloud and take spoken answers
     run_id: str = ""
 
 
@@ -49,9 +51,29 @@ class Runner:
             model=str(settings.get("llm.model", "claude-opus-5")),
             resume_text=profile.resume_text(),
             profile_summary=profile.summary_for_llm(),
-            min_confidence=str(settings.get("llm.min_confidence", "high")),
+            min_confidence=str(settings.get("llm.min_confidence", "medium")),
             max_resume_chars=int(settings.get("llm.max_resume_chars", 12000)),
+            web_research=bool(settings.get("llm.web_research", True)),
+            research_cache_dir=resolve_path(str(settings.get("llm.research_cache_dir", "./data/research"))),
+            max_job_text_chars=int(settings.get("llm.max_job_text_chars", 8000)),
         )
+        self._voice = None
+        self._voice_built = False
+
+    def voice_io(self):
+        """Lazily build the voice backend (only when --voice was requested)."""
+        if not self.opts.voice:
+            return None
+        if not self._voice_built:
+            from .voice import build_voice
+
+            self._voice_built = True
+            self._voice = build_voice(self.settings.get("voice", {}) or {}, console)
+            if self._voice.can_listen:
+                console.print("[green]Voice mode: questions will be read aloud; answer with your microphone.[/]")
+            else:
+                console.print("[yellow]Voice mode requested but the microphone/speech-to-text backend is unavailable; falling back to typed answers.[/]")
+        return self._voice
 
     # ------------------------------------------------------------------ #
     # Listings
@@ -191,30 +213,39 @@ class Runner:
             if self._captcha_gate(page, rec, shots, listing, stage="before filling"):
                 return rec
 
+            handler.prepare_context(research=bool(self.settings.get("llm.web_research", True)))
             fill: FillResult = handler.fill()
-            rec.answers = [a.__dict__ for a in fill.answers]
-            rec.unanswered_questions = list(fill.unanswered)
+            self._record_fill(rec, fill)
 
             if self._captcha_gate(page, rec, shots, listing, stage="after filling"):
                 return rec
 
-            if fill.unanswered and self.opts.mode == "auto":
+            # Hand every unresolved question to the user (voice or typed) unless
+            # running unattended without --voice.
+            interactive = self.opts.mode == "review" or self.opts.voice
+            if fill.pending and interactive and not self._is_headless():
+                self._resolve_pending(handler, fill)
+                self._record_fill(rec, fill)
+
+            blocking = [p for p in fill.pending if p.required or p.draft]
+            if blocking and not interactive:
                 rec.status = "needs_manual"
-                rec.error = "Required questions could not be answered truthfully from profile/resume"
+                rec.error = "Questions need your input (see unanswered_questions)"
                 rec.screenshot_path = screenshot(page, shots, listing.company, "needs_manual")
                 return rec
 
             if self.opts.dry_run:
-                print_answers(fill.answers, fill.unanswered)
+                print_answers(fill.answers, fill.pending)
                 rec.status = "dry_run"
-                rec.error = "" if not fill.unanswered else "dry run; required questions unanswered"
+                rec.error = "" if not blocking else "dry run; questions still need you"
                 rec.screenshot_path = screenshot(page, shots, listing.company, "dry_run")
                 console.print("[cyan]Dry run: form filled, NOT submitted.[/]")
                 if self.opts.mode == "review":
                     Prompt.ask("Press Enter to continue to the next listing", default="")
                 return rec
 
-            if self.opts.mode == "review":
+            if interactive:
+                # Voice/typed answers never submit on their own: always confirm.
                 decision = self._review(page, fill)
                 if decision == "skip":
                     rec.status = "skipped"
@@ -265,6 +296,33 @@ class Runner:
     # Interaction
     # ------------------------------------------------------------------ #
 
+    def _is_headless(self) -> bool:
+        return bool(self.opts.headless if self.opts.headless is not None else self.settings.get("run.headless", False))
+
+    @staticmethod
+    def _record_fill(rec: ApplicationRecord, fill: FillResult) -> None:
+        rec.answers = [asdict(a) for a in fill.answers]
+        rec.unanswered_questions = [
+            f"{p.label} [{p.category}{', required' if p.required else ''}] — {p.reason}" for p in fill.pending
+        ]
+
+    def _resolve_pending(self, handler, fill: FillResult) -> None:
+        resolver = QuestionResolver(voice=self.voice_io(), console=console)
+        results = resolver.resolve(fill.pending, handler.apply_answer)
+        by_id = {r.field_id: r for r in results}
+        remaining = []
+        for p in fill.pending:
+            r = by_id.get(p.field_id)
+            if r and r.action == "accepted":
+                for a in fill.answers:
+                    if a.field_id == p.field_id:
+                        a.value, a.source, a.status = r.value, ("draft" if r.source == "draft" else "user"), "filled"
+                        a.reason = f"answered by you ({r.source})"
+            else:
+                remaining.append(p)
+        fill.pending = remaining
+        fill.unanswered = [p.label for p in remaining if p.required]
+
     def _captcha_gate(self, page, rec: ApplicationRecord, shots: Path, listing: Listing, stage: str) -> bool:
         """Returns True if the run of this listing should stop here."""
         if not captcha_present(page):
@@ -284,24 +342,27 @@ class Runner:
         return True
 
     def _review(self, page, fill: FillResult) -> str:
-        """Returns 'submit', 'skip' or 'manual'."""
+        """Returns 'submit', 'skip' or 'manual'. Nothing is submitted without a 'y'."""
         while True:
-            print_answers(fill.answers, fill.unanswered)
-            if fill.unanswered:
-                console.print("[yellow]Some required questions are blank. Choose [e] to fill them in the browser, or [n] to leave this job as needs_manual.[/]")
+            print_answers(fill.answers, fill.pending)
+            blocking = [p for p in fill.pending if p.required or p.draft]
+            if blocking:
+                console.print("[yellow]Some required questions or unapproved drafts remain. Choose [e] to finish them in the browser, or [n] to leave this job as needs_manual.[/]")
             choice = Prompt.ask("Submit this application? [y]es / [n]o (skip) / [e]dit in browser first", choices=["y", "n", "e"], default="n")
             if choice == "y":
-                if fill.unanswered:
-                    console.print("[yellow]Refusing to submit with required questions blank. Use [e] to complete them.[/]")
+                if blocking:
+                    console.print("[yellow]Refusing to submit with required questions blank or drafts unapproved. Use [e] to complete them.[/]")
                     continue
                 return "submit"
             if choice == "n":
-                return "manual" if fill.unanswered else "skip"
+                return "manual" if blocking else "skip"
             # edit
             Prompt.ask("Edit the form in the browser. Press Enter here when done", default="")
-            fill.unanswered = []  # user takes responsibility for the edited form
-            fill.answers.append(type(fill.answers[0])("(edited in browser)", "see browser", "manual") if fill.answers else None)  # type: ignore[arg-type]
-            fill.answers = [a for a in fill.answers if a is not None]
+            fill.pending = []  # user takes responsibility for the edited form
+            fill.unanswered = []
+            from .ats.base import FieldAnswer
+
+            fill.answers.append(FieldAnswer("(edited in browser)", "see browser", "user", status="filled", reason="edited by you"))
             confirm = Prompt.ask("Submit now? [y]es / [n]o (mark needs_manual)", choices=["y", "n"], default="n")
             return "submit" if confirm == "y" else "manual"
 
