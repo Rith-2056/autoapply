@@ -32,7 +32,9 @@ education:
   major: Computer Science, Data Science and Statistics
   gpa: "3.93"
   gpa_scale: "4.0"
+  start_month: August
   start_year: 2024
+  start: August 2024
   graduation_month: May
   graduation_year: 2028
   graduation: May 2028
@@ -51,12 +53,21 @@ eeo:
   gender: Male
   disability: "No, I do not have a disability"
   veteran: "I am not a protected veteran"
+<<<<<<< HEAD
   race: Asian Indian
   hispanic: No
+=======
+  race: "Asian (South Asian)"
+  hispanic: "No, not Hispanic or Latino"
+  sexual_orientation: "Heterosexual / Straight"
+  # Not provided: these are always asked rather than guessed.
+  transgender: "[FILL IN]"
+  pronouns: "[FILL IN]"
+>>>>>>> b7480ff6d02f88afdd19e96fb1663cf3c0b46112
 
 preferences:
-  # How did you hear about us? (kept truthful)
-  how_did_you_hear: "SimplifyJobs GitHub internship list"
+  # "How did you hear about us?" is left blank and asked of you unless you fill this in.
+  how_did_you_hear: ""
   available_start: "May 2027"
   # Desired term for internships
   term: "Summer 2027"

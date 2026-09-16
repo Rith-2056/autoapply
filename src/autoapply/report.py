@@ -70,21 +70,31 @@ def print_counts(counts: dict[str, int]) -> None:
     console.print(table)
 
 
-def print_answers(answers: list[dict] | list, unanswered: list[str]) -> None:
+def print_answers(answers, pending=None) -> None:
+    """Table of every field with its status. Nothing is hidden: fields that need
+    the user are listed both in the table and in a separate 'Needs you' block."""
     table = Table(title="Form answers (review before submitting)", expand=True)
-    table.add_column("Field")
-    table.add_column("Answer")
+    table.add_column("Field", min_width=24)
+    table.add_column("Answer", min_width=24)
     table.add_column("Source", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
     table.add_column("Req", no_wrap=True)
+    style_for = {"profile": "green", "resume": "green", "inferred": "cyan", "llm": "cyan", "draft": "magenta",
+                 "user": "bold green", "prefilled": "dim", "needs_user": "bold red", "n/a": "dim", "skipped": "yellow"}
+    status_for = {"filled": "[green]filled[/]", "draft": "[magenta]needs approval[/]", "needs_user": "[bold red]NEEDS YOU[/]", "n/a": "[dim]n/a[/]"}
     for a in answers:
-        label = a.label if hasattr(a, "label") else a["label"]
-        value = a.value if hasattr(a, "value") else a["value"]
-        source = a.source if hasattr(a, "source") else a["source"]
-        required = a.required if hasattr(a, "required") else a.get("required", False)
-        style = {"llm": "magenta", "profile": "green", "resume": "green", "skipped": "yellow", "prefilled": "dim"}.get(source, "")
-        table.add_row(_short(label, 50), _short(str(value), 90), f"[{style}]{source}[/]", "*" if required else "")
+        g = (lambda k, d="": getattr(a, k, None) if hasattr(a, k) else a.get(k, d))
+        source, status = g("source"), g("status", "filled")
+        table.add_row(
+            _short(g("label"), 60), _short(str(g("value")), 100),
+            f"[{style_for.get(source, '')}]{source}[/]", status_for.get(status, status), "*" if g("required", False) else "",
+        )
     console.print(table)
-    if unanswered:
-        console.print("[bold yellow]Required questions left unanswered:[/]")
-        for q in unanswered:
-            console.print(f"  • {q}")
+    pending = pending or []
+    if pending:
+        console.print(f"[bold yellow]{len(pending)} question(s) need you:[/]")
+        for p in pending:
+            g = (lambda k, d="": getattr(p, k, None) if hasattr(p, k) else p.get(k, d))
+            tag = "required" if g("required", False) else "optional"
+            extra = " [magenta](draft ready for approval)[/]" if g("draft", "") else ""
+            console.print(f"  • {g('label')}  [dim]({g('category')}, {tag}) — {g('reason')}[/]{extra}")

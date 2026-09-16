@@ -43,6 +43,7 @@ def run(
     no_sync: bool = typer.Option(False, "--no-sync", help="Do not git pull the listings repo first."),
     ats: Optional[str] = typer.Option(None, "--ats", help="Comma-separated ATS types to attempt (e.g. greenhouse,lever)."),
     company: Optional[str] = typer.Option(None, "--company", help="Only listings whose company name contains this text."),
+    voice: bool = typer.Option(False, "--voice", help="Read unresolved questions aloud and take spoken answers (needs the voice extras, see README)."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Apply to matching listings (review mode by default)."""
@@ -74,6 +75,7 @@ def run(
         no_sync=no_sync,
         ats_only=[a.strip() for a in ats.split(",")] if ats else [],
         company=company,
+        voice=voice,
         run_id=run_id,
     )
     with _db() as db:
@@ -187,6 +189,12 @@ def check() -> None:
     console.print(("[green]" if txt.exists() else "[yellow]") + f"resume text: {txt} ({'found' if txt.exists() else 'missing; run: autoapply extract-resume'})[/]")
     console.print(("[green]" if secrets.anthropic_api_key else "[yellow]") + f"ANTHROPIC_API_KEY: {'set' if secrets.anthropic_api_key else 'not set'}[/]")
     console.print(f"workday accounts: {list(secrets.workday_accounts) or 'none'}")
+    for mod, what in (("sounddevice", "microphone"), ("faster_whisper", "speech-to-text"), ("pyttsx3", "text-to-speech (pyttsx3)")):
+        try:
+            __import__(mod)
+            console.print(f"[green]voice {what}: {mod} installed[/]")
+        except Exception:  # noqa: BLE001
+            console.print(f"[yellow]voice {what}: {mod} not installed (pip install -e '.[voice]')[/]")
     console.print(f"database: {settings.database_path}")
     try:
         from playwright.sync_api import sync_playwright

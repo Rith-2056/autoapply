@@ -35,7 +35,16 @@ def test_match_rule_paths():
     assert match_rule("How did you hear about this job?").path == "preferences.how_did_you_hear"
     assert match_rule("Tell us about a project you are proud of") is None
     assert should_skip("Cover Letter")
-    assert should_skip("Pronouns")
+    assert not should_skip("Pronouns")  # asked, never silently skipped
+    assert match_rule("End date month").path == "education.graduation_month"
+    assert match_rule("End date year").path == "education.graduation_year"
+    assert match_rule("Start date month").path == "education.start_month"
+    assert match_rule("Start date year").path == "education.start_year"
+    assert match_rule("Start date").path == "preferences.available_start"
+    assert match_rule("Alternate Email") is None
+    assert match_rule("Are you willing to work from the office location in Pittsburgh?").path == "work_authorization.willing_to_relocate"
+    assert match_rule("How would you describe your sexual orientation?").path == "eeo.sexual_orientation"
+    assert match_rule("Do you identify as transgender?").path == "eeo.transgender"
 
 
 def test_profile_value_and_placeholders():
@@ -97,3 +106,14 @@ def test_clean_label_strips_option_text():
     assert clean_label("Gender Select ... Male Female Decline to self-identify") == "Gender"
     assert clean_label("Veteran status Select ... I identify as one or more") == "Veteran status"
     assert clean_label("Preferred name") == "Preferred name"
+
+
+def test_choose_graduation():
+    from autoapply.fields import choose_graduation
+
+    opts = ["Fall 2027", "Spring 2028", "Summer 2028", "Fall 2028"]
+    assert choose_graduation(opts, "May", 2028) == "Spring 2028"
+    assert choose_graduation(["2027", "2028", "2029"], "May", "2028") == "2028"
+    assert choose_graduation(["May 2028", "December 2028"], "May", 2028) == "May 2028"
+    assert choose_graduation(["2027-2028", "2028-2029"], "May", 2028) is None  # ambiguous
+    assert choose_graduation(["2027"], "May", 2028) is None

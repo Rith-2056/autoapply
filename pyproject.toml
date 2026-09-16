@@ -22,6 +22,7 @@ autoapply = "autoapply.cli:app"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+voice = ["sounddevice>=0.4.6", "numpy>=1.26", "faster-whisper>=1.0", "pyttsx3>=2.90"]
 
 [build-system]
 requires = ["hatchling"]

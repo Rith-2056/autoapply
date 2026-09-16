@@ -10,9 +10,12 @@ what it applied to.
 * One handler per applicant tracking system (ATS): Greenhouse, Lever, Ashby,
   SmartRecruiters, Workday (needs per-company credentials), and a generic fallback.
 * Standard fields are filled from `config/profile.yaml`; the resume PDF is uploaded.
-* Free-text / unexpected questions go to an LLM that is given only your resume text and
-  profile and must refuse rather than invent anything. Low-confidence or unanswerable
-  questions stop the application and mark it `needs_manual` with the question text saved.
+* Every other question goes through an explicit decision: answered from the resume/profile
+  (explicit facts **or reasonable, direct inference**), drafted for your approval (why-this-
+  company style questions, grounded in your resume plus company/role research), or handed to
+  you. **Nothing is silently skipped.**
+* `--voice` reads each unresolved question aloud, records your spoken answer, transcribes
+  it, shows it to you, and only writes it into the correct field after you accept it.
 * CAPTCHAs are never bypassed. In review mode you solve them in the browser; in auto
   mode the job is marked `needs_manual`.
 * Every attempt is stored in SQLite (`data/applications.db`) with a screenshot.
@@ -41,6 +44,9 @@ pip install -e ".[dev]"
 
 # browser for Playwright (one time)
 playwright install chromium
+
+# optional: voice answering (microphone + local speech-to-text + text-to-speech)
+uv pip install -e ".[voice]"      # or: pip install -e ".[voice]"
 ```
 
 Then:
@@ -51,12 +57,13 @@ Then:
    autoapply extract-resume        # writes resume/resume.txt
    ```
 2. **Profile** – open `config/profile.yaml` and replace every `[FILL IN]`
-   (address / city, US work authorization, sponsorship, relocation, race/ethnicity,
-   Hispanic/Latino). Anything left as `[FILL IN]` is never typed into a form; if a form
-   requires it, that job becomes `needs_manual`.
+   (address / city, US work authorization, sponsorship, relocation, citizenship,
+   transgender status, pronouns). Anything left as `[FILL IN]` is never typed into a
+   form; the question is asked of you instead. Education dates (August 2024 → May 2028),
+   gender, race/ethnicity and sexual orientation are already filled in.
 3. **Secrets** – `cp .env.example .env` and set:
-   * `ANTHROPIC_API_KEY` – used for unexpected questions. Without it those questions are
-     left blank and the job is marked `needs_manual`.
+   * `ANTHROPIC_API_KEY` – used for inference, drafts and company research. Without it
+     every question the profile rules can't answer is handed to you.
    * `WORKDAY_ACCOUNTS` – optional JSON mapping a Workday hostname to
      `{"email": ..., "password": ...}`. Workday listings without credentials are marked
      `needs_manual`.
@@ -103,8 +110,20 @@ run:
 
 llm:
   model: claude-opus-5
-  min_confidence: high               # low | medium | high — answers below this are rejected
+  min_confidence: medium             # medium = reasonable inference allowed; high = explicit facts only
   max_resume_chars: 12000
+  web_research: true                 # web-search the company/role before drafting "why us" answers
+  research_cache_dir: ./data/research
+  max_job_text_chars: 8000
+
+voice:                               # used by `autoapply run --voice`
+  tts: auto                          # auto | pyttsx3 | say (macOS) | off
+  stt: faster_whisper                # faster_whisper | off
+  whisper_model: base.en             # downloaded on first use (~150 MB); try small.en for accuracy
+  language: en
+  max_record_seconds: 90
+  silence_seconds: 2.5
+  sample_rate: 16000
 ```
 
 Category aliases such as `software`, `ml`, `data science`, `quant` are normalised to the
@@ -142,6 +161,7 @@ contains the configured term. This is the same logic the repo's own README gener
 | `autoapply run --ats greenhouse,lever` | Only attempt these ATS types. |
 | `autoapply run --company doordash` | Only listings whose company matches. |
 | `autoapply run --retry` | Re-attempt listings previously `failed` / `needs_manual` / `skipped`. |
+| `autoapply run --voice` | Read each unresolved question aloud and answer by microphone (see §5). |
 | `autoapply run --headless` / `--headed` | Override `run.headless`. |
 | `autoapply run --no-sync` | Skip the `git pull`. |
 | `autoapply listings` | Show listings matching your filters, with detected ATS and DB status. |
@@ -153,12 +173,17 @@ contains the configured term. This is the same logic the repo's own README gener
 
 ### Review mode
 
-For each listing the browser fills the form, then the terminal prints a table of every
-field, the value, and its source (`profile`, `resume`, `llm`, `skipped`). You choose:
+For each listing the browser fills the form. Questions that need you are then walked
+through one by one (voice or typed, see §5). Finally the terminal prints a table of every
+field with its value, source (`profile`, `resume`, `inferred`, `draft`, `user`) and status
+(`filled`, `needs approval`, `NEEDS YOU`, `n/a`). You choose:
 
 * `y` – submit
-* `n` – skip (status `skipped`; or `needs_manual` if required questions were blank)
+* `n` – skip (status `skipped`; or `needs_manual` if required questions or unapproved drafts remain)
 * `e` – edit the form yourself in the browser, press Enter, then confirm submission
+
+`y` is refused while a required question is blank or a draft is unapproved. A spoken or
+typed answer never submits anything by itself.
 
 If a CAPTCHA appears, review mode pauses so you can solve it in the browser.
 
@@ -179,28 +204,67 @@ Listings that already have any record other than `dry_run` are skipped on later 
 
 ## 4. How answers are decided
 
-1. **Profile rules** (`src/autoapply/fields.py`): the field label is matched against
-   patterns (name, email, phone, LinkedIn, GitHub, school, degree, GPA, graduation,
-   address, work authorization, sponsorship, relocation, EEO questions, "how did you hear",
-   consent/acknowledgement, SMS opt-in, …) and the matching value from `profile.yaml`
-   is typed or selected. Dropdown options are matched fuzzily (Yes/No semantics, GPA
-   ranges, month names). Identity rules only match short labels, so a long question that
-   merely mentions "email" is not filled with your email address.
-2. **Resume upload** for any `resume`/`CV` file input. Cover-letter uploads are skipped.
-3. **LLM** (only for unknown *required* questions, or unknown free-text questions):
-   the model sees your resume text + profile and returns `{can_answer, answer, confidence}`.
-   It is instructed never to invent facts; when given options it must return one of them
-   verbatim. Only answers at or above `llm.min_confidence` are used.
-4. Anything else stays blank. If it was required, the job becomes `needs_manual` and
-   the question text is saved in the database.
-5. After typing, every text field is read back; a value that did not stick is reported
-   as unanswered rather than assumed.
+Every form field is classified (`src/autoapply/classify.py`) into a category, and each
+category has a policy:
 
-Every profile value that is still `[FILL IN]` is treated as unknown.
+| Category | Policy | What happens |
+|---|---|---|
+| personal info, contact | profile | Filled from `profile.yaml` rules. No rule / no value → asked. Never inferred. |
+| education | infer | Rules first (school, degree, major, GPA incl. ranges, start Aug 2024, end May 2028, "Spring 2028"-style graduation selects); otherwise the LLM may infer from the resume (e.g. "currently enrolled?", "received an academic honor?" → Dean's List / Adams Scholarship). |
+| employment, technical skills | infer | Inferred from the resume ("completed at least one internship?", "years of experience", "technical domains you're interested in" → the domains that recur in your projects). |
+| work authorization, sponsorship | strict | Explicit profile facts only ("authorized in the US", "requires sponsorship"). OPT/CPT/clearance questions the profile doesn't state are asked. Never inferred for another country. |
+| demographics | profile | Gender, race/ethnicity, sexual orientation, Hispanic/Latino, veteran, disability from the profile. Transgender status / pronouns are `[FILL IN]` → asked. The LLM never sees these. |
+| availability | infer | Start date / term / willingness to work on-site from the profile, else inferred. |
+| salary | ask | Always you. |
+| job source ("How did you hear about us?") | blank | Left blank and asked. Never inferred. |
+| company motivation, role motivation, behavioral | draft | The LLM writes a first-person draft grounded in your real projects and the company/role research, filled into the form and flagged **needs approval**. You accept, edit, re-answer by voice, or skip. |
+| short answer, long form, other | infer | The LLM decides per question: answer (fact or reasonable inference), draft (subjective), or ask you. |
 
----
+The decision engine (`src/autoapply/planner.py`) runs profile rules first, then makes
+**one batched LLM call** per form for everything left (`src/autoapply/llm.py`). Each LLM
+result is `answer` / `draft` / `ask_user` with a confidence and a one-line reason;
+answers below `llm.min_confidence` become `ask_user`, and answers to option fields must
+match an option exactly.
 
-## 5. ATS handlers
+The LLM is given your resume text, the profile facts, the job posting text captured from
+the page, and (when `llm.web_research` is on) a cached research brief about the company
+and role produced with web search (`data/research/<company>-<role>.md`). It is instructed
+never to invent employers, titles, dates, degrees, GPA, projects, technologies, awards,
+demographics, motivations, or how you found the job.
+
+After every value is typed it is read back; a value that did not stick is reported as
+needing you rather than assumed. The result is that every field ends in exactly one bucket:
+`filled`, `needs approval` (draft), `NEEDS YOU`, or `n/a` (cover-letter upload, password).
+
+## 5. Voice answering
+
+```bash
+autoapply run --voice            # review mode + voice
+autoapply run --voice --dry-run  # try the whole flow without submitting
+```
+
+After the form is filled, each question that needs you is handled in order (required
+first):
+
+1. The question (and its options, if any) is printed and **read aloud**.
+2. **● Listening…** – your microphone records until you pause for `silence_seconds`
+   (or `max_record_seconds`). Silence for a few seconds ends the attempt gracefully.
+3. The recording is transcribed locally with faster-whisper and shown to you.
+4. You choose: `a` accept · `r` retry · `e` edit the text · `t` type instead · `s` skip.
+   For option fields a spoken answer is matched to an option ("yes", "option three", or
+   the option's text); if nothing matches you can pick by number.
+5. On accept, the answer is written into **that field only** (mapped by the field's id,
+   never by position) and verified. Then the next question is read.
+6. Drafts are read out as "I drafted an answer for …" and shown; accept, edit, answer by
+   voice instead, or skip (which clears the draft from the form).
+
+When the run finishes the questions, the normal review table is shown and you still have
+to type `y` to submit. Voice input never submits an application on its own.
+
+If the voice packages aren't installed or the microphone isn't available, the same flow
+runs with typed answers. Text-to-speech uses macOS `say` when available, else pyttsx3.
+
+## 6. ATS handlers
 
 | ATS | Detection | Notes |
 |---|---|---|
@@ -215,7 +279,7 @@ Links that redirect (e.g. Simplify short links) are re-detected after navigation
 
 ---
 
-## 6. Project layout
+## 7. Project layout
 
 ```
 config/       profile.yaml, settings.yaml
@@ -226,13 +290,18 @@ src/autoapply/
   cli.py          Typer CLI
   runner.py       run orchestration, review prompt, captcha gate, delays
   listings.py     repo sync, listings.json parser, README fallback, filters
-  ats/            detection + one handler per ATS (base.py has the generic filler)
+  ats/            detection + one handler per ATS (base.py: enumerate → plan → apply)
+  classify.py     question categories and per-category policies
+  planner.py      decision engine: profile rules, then one batched LLM call
   fields.py       label → profile mapping rules and option matching
-  llm.py          Anthropic-backed question answering with refusal
+  llm.py          Anthropic-backed inference (answer / draft / ask_user) + company research
+  resolve.py      conversational flow for questions that need you (voice or typed)
+  voice.py        text-to-speech, microphone recording, speech-to-text backends
   db.py           SQLite layer
   report.py       terminal tables
   dashboard.py    Streamlit app
-tests/            parser, ATS detection, database, field-mapping tests
+tests/            parser, ATS detection, database, field mapping, classification,
+                  planner (fake LLM) and voice-resolution (fake mic/TTS) tests
 ```
 
 Run the tests:
@@ -243,7 +312,7 @@ pytest
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 * **`Executable doesn't exist`** – run `playwright install chromium`, or set
   `run.chromium_executable` (or env `AUTOAPPLY_CHROMIUM`) to an existing Chrome binary.
@@ -254,3 +323,8 @@ pytest
   review mode's `e` to pick it yourself.
 * **Nothing matches** – `autoapply listings` shows what passes your filters and why
   candidates are excluded (already in DB, ATS not allowed).
+* **Voice: "Microphone unavailable"** – install the extras (`pip install -e ".[voice]"`);
+  on macOS grant the terminal microphone permission (System Settings → Privacy & Security
+  → Microphone). The first run downloads the whisper model.
+* **Too many questions asked** – add the fact to `profile.yaml` (e.g. `citizenship`,
+  `transgender`, `how_did_you_hear`) and it will be filled next time.
