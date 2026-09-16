@@ -14,16 +14,16 @@ contact:
   phone: "669-249-4174"
   linkedin: https://linkedin.com/in/rithshiv
   github: https://github.com/rithshiv
-  website: ""            # portfolio URL, optional
+  website: https://rith-portfolio-bay.vercel.app/            # portfolio URL, optional
 
 address:
-  street: "[FILL IN]"
-  city: "[FILL IN]"
-  state: "[FILL IN]"     # e.g. MA
-  zip: "[FILL IN]"
+  street: 799 San Juan Drive
+  city: Sunnyvale
+  state: CA     # e.g. MA
+  zip: "94085"
   country: United States
   # Single-line version used when a form has one "Location" / "City" field
-  location: "[FILL IN]"  # e.g. "Amherst, MA"
+  location: Sunnyvale, CA  # e.g. "Amherst, MA"
 
 education:
   school: University of Massachusetts Amherst
@@ -41,18 +41,18 @@ education:
 
 work_authorization:
   # e.g. "Yes, I am authorized to work in the United States"
-  authorized_us: "[FILL IN]"
+  authorized_us: Yes, I am authorized to work in the United States
   # Yes / No — will you now or in the future require visa sponsorship?
-  requires_sponsorship: "[FILL IN]"
-  willing_to_relocate: "[FILL IN]"   # Yes / No
-  citizenship: "[FILL IN]"           # optional, e.g. "United States"
+  requires_sponsorship: No
+  willing_to_relocate: Yes   # Yes / No
+  citizenship: United states         # optional, e.g. "United States"
 
 eeo:
   gender: Male
   disability: "No, I do not have a disability"
   veteran: "I am not a protected veteran"
-  race: "[FILL IN or Decline to self-identify]"
-  hispanic: "[FILL IN or Decline to self-identify]"
+  race: Asian Indian
+  hispanic: No
 
 preferences:
   # How did you hear about us? (kept truthful)
