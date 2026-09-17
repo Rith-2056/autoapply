@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoApplier</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">A</span><span>AutoApplier</span></div>
+    <nav>
+      <a href="#/" data-route="/">Dashboard</a>
+      <a href="#/applications" data-route="/applications">Applications</a>
+      <a href="#/actions" data-route="/actions">Action Center <span id="nav-actions-badge" class="badge hidden"></span></a>
+      <a href="#/autoapply" data-route="/autoapply">AutoApply <span id="nav-session-dot" class="dot hidden"></span></a>
+      <a href="#/profile" data-route="/profile">Profile</a>
+      <a href="#/settings" data-route="/settings">Settings</a>
+      <a href="#/debug" data-route="/debug" class="muted">Debug</a>
+    </nav>
+    <div class="sidebar-footer">
+      <button id="btn-notifications" class="ghost">🔔 <span id="notif-count" class="badge hidden"></span></button>
+      <span id="conn" class="conn" title="live connection">●</span>
+    </div>
+  </aside>
+  <main id="main"></main>
+  <div id="toasts"></div>
+  <div id="notif-panel" class="panel hidden"></div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

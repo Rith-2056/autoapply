@@ -1,5 +1,6 @@
 # secrets
 .env
+config/google_oauth_client.json
 
 # runtime data: applications db, cloned listings repo, screenshots, browser profile
 data/

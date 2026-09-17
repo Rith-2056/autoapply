@@ -10,9 +10,10 @@ from typing import Optional
 import typer
 
 from . import __version__
-from .config import PROJECT_ROOT, load_profile, load_secrets, load_settings
-from .db import STATUSES, Database
-from .report import console, print_counts, print_records
+from .config import PROJECT_ROOT, load_profile, load_secrets, load_settings, resolve_path
+from .report import console
+from .tracker import ApplicationStatus, Tracker
+from .tracker.states import STATUS_LABELS
 
 app = typer.Typer(
     name="autoapply",
@@ -22,8 +23,13 @@ app = typer.Typer(
 )
 
 
-def _db() -> Database:
-    return Database(load_settings().database_path)
+def _tracker() -> Tracker:
+    settings = load_settings()
+    t = Tracker(resolve_path(str(settings.get("run.tracker_database", "./data/autoapply.db"))))
+    from .tracker.migrate import migrate_legacy
+
+    migrate_legacy(t, settings.database_path)
+    return t
 
 
 @app.callback()
@@ -78,13 +84,13 @@ def run(
         voice=voice,
         run_id=run_id,
     )
-    with _db() as db:
-        runner = Runner(settings, profile, secrets, db, opts)
-        try:
-            records = runner.run()
-        except KeyboardInterrupt:
-            console.print("[yellow]Interrupted; recording what finished.[/]")
-            records = runner.results
+    tracker = _tracker()
+    runner = Runner(settings, profile, secrets, tracker, opts)
+    try:
+        records = runner.run()
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted; recording what finished.[/]")
+        records = runner.results
     print_run_summary(records, run_id)
 
 
@@ -115,38 +121,48 @@ def listings(
     table.add_column("In DB", no_wrap=True)
     table.add_column("URL", overflow="fold")
     shown = 0
-    with _db() as db:
-        for l in matched:
-            a = detect_ats(l.url)
-            status = db.latest_status(l.id, l.url) or ""
-            if not show_all and (status or (allow and a not in allow)):
-                continue
-            table.add_row(l.posted.strftime("%Y-%m-%d"), l.company[:28], l.title[:45], l.location[:28], l.category, a, status, l.url)
-            shown += 1
-            if shown >= limit:
-                break
+    t = _tracker()
+    for l in matched:
+        a = detect_ats(l.url)
+        job = t.find_duplicate_job(l.company, l.title, l.location, l.url)
+        app = t.application_for_job(job["id"]) if job else None
+        status = app["status"] if app else ""
+        if not show_all and (status or (allow and a not in allow)):
+            continue
+        table.add_row(l.posted.strftime("%Y-%m-%d"), l.company[:28], l.title[:45], l.location[:28], l.category, a, status, l.url)
+        shown += 1
+        if shown >= limit:
+            break
     console.print(table)
 
 
 @app.command()
 def status(
-    status: Optional[str] = typer.Option(None, "--status", "-s", help=f"One of {', '.join(STATUSES)}"),
+    status: Optional[str] = typer.Option(None, "--status", "-s", help="Tracker status, e.g. SUBMITTED, NEEDS_INPUT, ASSESSMENT"),
     company: Optional[str] = typer.Option(None, "--company", "-c", help="Company name contains"),
     since: Optional[str] = typer.Option(None, "--since", help="YYYY-MM-DD"),
     until: Optional[str] = typer.Option(None, "--until", help="YYYY-MM-DD"),
-    run_id: Optional[str] = typer.Option(None, "--run", help="Only this run id"),
     search: Optional[str] = typer.Option(None, "--search", help="Text in company/role/location"),
+    needs_action: bool = typer.Option(False, "--needs-action"),
     limit: Optional[int] = typer.Option(None, "--limit", "-n"),
-    show_url: bool = typer.Option(True, "--url/--no-url"),
 ) -> None:
-    """List recorded applications with filters."""
-    if status and status not in STATUSES:
-        console.print(f"[red]Unknown status {status!r}. Choose from: {', '.join(STATUSES)}[/]")
+    """List tracked applications (the web app shows the same data)."""
+    from rich.table import Table
+
+    if status and status.upper() not in {s.value for s in ApplicationStatus}:
+        console.print(f"[red]Unknown status {status!r}. Choose from: {', '.join(s.value for s in ApplicationStatus)}[/]")
         raise typer.Exit(2)
-    with _db() as db:
-        records = db.query(status=status, company=company, since=since, until=until, run_id=run_id, search=search, limit=limit)
-        print_records(records, title=f"{len(records)} application(s)", show_url=show_url)
-        print_counts(db.counts_by_status())
+    t = _tracker()
+    rows = t.list_applications(status=status.upper() if status else None, company=company, since=since, until=until, search=search, needs_action=needs_action, limit=limit)
+    table = Table(title=f"{len(rows)} application(s)", expand=True)
+    for col in ("Applied", "Company", "Role", "Location", "Status", "Next action", "URL"):
+        table.add_column(col, overflow="fold" if col == "URL" else "ellipsis")
+    for a in rows:
+        table.add_row((a.get("date_applied") or a["created_at"])[:10], a["company"], a["title"], a.get("location", ""),
+                      STATUS_LABELS.get(ApplicationStatus(a["status"]), a["status"]), a.get("next_action") or "", a["job_url"])
+    console.print(table)
+    m = t.metrics()
+    console.print(f"total {m['total_applications']} · needs action {m['needs_action']} · assessments {m['assessments']} · interviews {m['interviews']} · offers {m['offers']} · rejections {m['rejections']}")
 
 
 @app.command()
@@ -157,15 +173,36 @@ def export(
     since: Optional[str] = typer.Option(None, "--since"),
     until: Optional[str] = typer.Option(None, "--until"),
 ) -> None:
-    """Export applications to CSV."""
-    with _db() as db:
-        n = db.export_csv(out, status=status, company=company, since=since, until=until)
-    console.print(f"Exported {n} record(s) to {out}")
+    """Export tracked applications to CSV."""
+    import csv
+
+    rows = _tracker().list_applications(status=status.upper() if status else None, company=company, since=since, until=until)
+    cols = ["id", "date_applied", "company", "title", "location", "status", "next_action", "next_action_deadline", "ats", "job_url", "application_url", "error", "created_at", "updated_at"]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for a in rows:
+            w.writerow({k: a.get(k, "") for k in cols})
+    console.print(f"Exported {len(rows)} record(s) to {out}")
+
+
+@app.command()
+def web(host: str = typer.Option("127.0.0.1", "--host"), port: int = typer.Option(8710, "--port"),
+        no_browser: bool = typer.Option(False, "--no-browser")) -> None:
+    """Start the AutoApplier web app (dashboard, tracker, action center, AutoApply, voice)."""
+    from .logging_setup import new_run_id, setup_logging
+    from .web.app import serve
+
+    settings = load_settings()
+    setup_logging(settings.logs_dir, "web_" + new_run_id())
+    console.print(f"[bold]AutoApplier[/] → http://{host}:{port}")
+    serve(host, port, open_browser=not no_browser)
 
 
 @app.command()
 def dashboard(port: int = typer.Option(8501, "--port"), headless: bool = typer.Option(False, "--no-browser", help="Don't open a browser tab")) -> None:
-    """Launch the local Streamlit dashboard."""
+    """(Legacy) Launch the Streamlit read-only dashboard. Prefer `autoapply web`."""
     app_path = Path(__file__).with_name("dashboard.py")
     cmd = [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)]
     if headless:

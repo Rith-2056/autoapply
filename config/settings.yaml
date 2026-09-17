@@ -41,7 +41,8 @@ run:
   page_timeout_ms: 45000
   screenshots_dir: ./data/screenshots
   browser_profile_dir: ./data/browser_profile
-  database: ./data/applications.db
+  database: ./data/applications.db          # legacy (imported once into the tracker)
+  tracker_database: ./data/autoapply.db     # tracker: jobs, applications, events, emails, actions
   logs_dir: ./logs
 
 llm:
@@ -57,13 +58,25 @@ llm:
   research_cache_dir: ./data/research
   # Max characters of the job page text passed as context.
   max_job_text_chars: 8000
+  # Fast model for transcript clean-up (dictation). Cheap and low-latency.
+  fast_model: claude-haiku-4-5
 
 voice:
-  # Enable with `autoapply run --voice`. Requires: pip install -e ".[voice]"
-  tts: auto            # auto | pyttsx3 | say (macOS) | off
+  # Web app: the browser captures speech (Web Speech API) and the server cleans it up.
+  # Questions are never read aloud. llm_cleanup uses llm.fast_model for punctuation/homophones.
+  llm_cleanup: true
+  # CLI only (`autoapply run --voice`). Requires: pip install -e ".[voice]"
+  tts: off             # auto | pyttsx3 | say (macOS) | off
   stt: faster_whisper  # faster_whisper | off
   whisper_model: base.en
   language: en
   max_record_seconds: 90
   silence_seconds: 2.5
   sample_rate: 16000
+
+email:
+  enabled: true
+  # Desktop OAuth client JSON from Google Cloud Console (Gmail API, read-only scope).
+  google_client_file: ./config/google_oauth_client.json
+  poll_interval_seconds: 300
+  llm_classification: true

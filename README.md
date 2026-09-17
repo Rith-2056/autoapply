@@ -1,29 +1,46 @@
-# autoapply
+# AutoApplier
 
-A Python CLI that applies to **Summer 2027 internships** from the
-[SimplifyJobs/Summer2027-Internships](https://github.com/SimplifyJobs/Summer2027-Internships)
-list with a real (headed) browser, and records every attempt so you can always see
-what it applied to.
+Your job-search command center for **Summer 2027 internships**: discovers jobs from the
+[SimplifyJobs list](https://github.com/SimplifyJobs/Summer2027-Internships), applies with a
+visible browser, asks you only what it cannot answer (by dictation or typing), tracks every
+application, reads your Gmail for assessments / interviews / rejections, and tells you what to
+do next.
 
-* Listings come from the repo's structured `.github/scripts/listings.json`
-  (README table parsing is only a fallback).
-* One handler per applicant tracking system (ATS): Greenhouse, Lever, Ashby,
-  SmartRecruiters, Workday (needs per-company credentials), and a generic fallback.
-* Standard fields are filled from `config/profile.yaml`; the resume PDF is uploaded.
-* Every other question goes through an explicit decision: answered from the resume/profile
-  (explicit facts **or reasonable, direct inference**), drafted for your approval (why-this-
-  company style questions, grounded in your resume plus company/role research), or handed to
-  you. **Nothing is silently skipped.**
-* `--voice` reads each unresolved question aloud, records your spoken answer, transcribes
-  it, shows it to you, and only writes it into the correct field after you accept it.
-* CAPTCHAs are never bypassed. In review mode you solve them in the browser; in auto
-  mode the job is marked `needs_manual`.
-* Every attempt is stored in SQLite (`data/applications.db`) with a screenshot.
-  `autoapply status`, `autoapply dashboard` (Streamlit) and `autoapply export` show it.
+```bash
+autoapply web          # opens http://127.0.0.1:8710
+```
 
-> **Read before running for real.** `--review` is the default: the tool fills the form,
-> shows you every answer, and only submits when you type `y`. Use `--dry-run` for the
-> first few runs. `--auto` submits without asking.
+**Web app** (primary interface): Dashboard · Applications · Action Center · AutoApply · Profile ·
+Settings · Debug. The terminal commands still exist for development (`autoapply run`,
+`status`, `export`, `listings`, `check`).
+
+Architecture and the implementation plan: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## How it works
+
+```
+Discover (SimplifyJobs listings.json) → filter → open in Playwright → fill from profile
+→ classify every question → answer / draft / ask you → you answer (mic or keyboard)
+→ contextual clean-up of what you said → review → submit → tracker
+→ Gmail monitor: classify emails → match to application → status / actions / deadlines
+→ Action Center + notifications
+```
+
+* Automation, question classification and inference are unchanged from the CLI version
+  (`ats/`, `classify.py`, `planner.py`, `llm.py`). The web app drives them through an
+  `Interaction` interface (`interaction.py`, `web/orchestrator.py`).
+* Every application has an explicit **state machine** (`tracker/states.py`) and an
+  **event log**; status is derived from events, invalid transitions are rejected.
+* **Voice is dictation, not a conversation.** Questions are displayed, never read aloud.
+  Press 🎙, speak, stop; the transcript appears immediately (browser speech recognition,
+  streaming) and is cleaned with context (company, role, question, your resume vocabulary).
+  Uncertain words are highlighted with "Did you mean …?" chips. The clean-up may only edit
+  what you said: a guard rejects any result that adds content. Any system-wide dictation
+  tool (e.g. Wispr Flow) also works: dictate into the answer box, then press "Clean up".
+* **Email intelligence** (Gmail, read-only): rule + LLM classification, structured
+  extraction (company, role, platform, deadline, action), multi-signal matching with
+  confidence (auto-link ≥ 0.8, ask you 0.5–0.8, ignore below), deadline parsing to real
+  timestamps, automatic status updates, actions and notifications.
 
 ---
 
@@ -67,10 +84,21 @@ Then:
    * `WORKDAY_ACCOUNTS` – optional JSON mapping a Workday hostname to
      `{"email": ..., "password": ...}`. Workday listings without credentials are marked
      `needs_manual`.
-4. **Check** everything:
+4. **Check** everything, then start the web app:
    ```bash
    autoapply check
+   autoapply web
    ```
+   The old flat database (`data/applications.db`) is imported into the tracker
+   (`data/autoapply.db`) on first start.
+
+5. **Email (optional but recommended)** – in Google Cloud Console create a project, enable
+   the **Gmail API**, create an **OAuth client ID of type Desktop app**, download the JSON
+   and save it as `config/google_oauth_client.json` (git-ignored; or set
+   `GOOGLE_OAUTH_CLIENT_FILE`). Then Settings → **Connect Gmail**: a Google sign-in opens,
+   requesting the read-only scope only. The token is stored encrypted (Fernet; key from
+   `AUTOAPPLY_SECRET_KEY` or an auto-generated `data/.secret_key`). Disconnect deletes it.
+   Only job-related emails are processed; irrelevant mail is never stored.
 
 `.env`, `data/`, `resume/` and `logs/` are git-ignored.
 
@@ -150,10 +178,38 @@ contains the configured term. This is the same logic the repo's own README gener
 
 ---
 
-## 3. Commands
+## 3. Web app
+
+| Page | What it does |
+|---|---|
+| Dashboard | Counts (total / today / week / month / need action / assessments / interviews / offers), action-required list, current AutoApply session, recent applications. Live via Server-Sent Events. |
+| Applications | Tracker table: company, position, applied date, status, next action. Filters: status, date range, needs-action; search box understands "needs action", "assessment", "interview", company names, locations. Rows open the detail page. |
+| Application detail | Status (with manual override, invalid transitions are refused), next action + deadline, application facts, timeline, every question with raw transcription / cleaned / final answer / source / approval, linked emails, job description, Retry/resume for failed or needs-input applications. |
+| Action Center | "What do I need to do right now?": open actions sorted by priority and deadline (Open / View / Done / dismiss), applications waiting for a response, recently completed. |
+| AutoApply | Configure a session (target roles, locations, max applications, categories, exclusions, dry run, retry) with a preview of matching jobs. Live session: progress, per-application steps, question cards with 🎙 Speak / ✨ Clean up / Reuse answer / Skip / Confirm, review panel (Submit / I edited it in the browser / Skip / Leave for later), CAPTCHA pause (I solved it / Skip). Pause / Resume / Cancel. The session runs in the backend; refreshing the page does not stop it. |
+| Profile | Edit `profile.yaml` sections; placeholders are highlighted. Resume text preview. |
+| Settings | Gmail connect / sync / disconnect, possible-match confirmations, AI key status, voice clean-up toggle, filter defaults. |
+| Debug | Session state, recent internal events, email monitor state. |
+
+### Answering questions (voice)
+
+1. The question card shows the label, category, why it needs you, and options if any.
+2. Press **🎙 Speak**. Chrome/Edge/Safari transcribe in the browser as you talk (interim
+   text streams into the box). Other browsers record and send the audio to the server,
+   which transcribes with faster-whisper if the voice extras are installed.
+3. When you stop, the transcript is cleaned with context and shown with a confidence
+   level. Uncertain words are highlighted with suggestion chips; nothing is ever added.
+4. Edit if you like, then **Confirm answer**. The answer goes into *that* form field
+   (mapped by field id) and is verified. Long answers you confirm become reusable
+   ("Reuse answer" suggests them on similar questions later; you still click to use them).
+5. **Continue to review** → the review panel lists every field. **Submit** is disabled
+   while required fields are blank or drafts are unapproved. Nothing submits without your click.
+
+## 3b. CLI commands (development / debugging)
 
 | Command | What it does |
 |---|---|
+| `autoapply web` | Start the web app (`--port`, `--host`, `--no-browser`). |
 | `autoapply run` | Sync listings, filter, apply. **Review mode by default.** |
 | `autoapply run --dry-run` | Fill forms, never submit. Records status `dry_run`. |
 | `autoapply run --auto` | Submit without confirmation. |
@@ -165,9 +221,9 @@ contains the configured term. This is the same logic the repo's own README gener
 | `autoapply run --headless` / `--headed` | Override `run.headless`. |
 | `autoapply run --no-sync` | Skip the `git pull`. |
 | `autoapply listings` | Show listings matching your filters, with detected ATS and DB status. |
-| `autoapply status` | Table of all recorded applications. Filters: `--status`, `--company`, `--since`, `--until`, `--run`, `--search`, `--limit`. |
-| `autoapply dashboard` | Local Streamlit dashboard (counts, search/filter, job links, screenshots, CSV download). |
-| `autoapply export --out data/applications.csv` | Export to CSV (same filters as `status`). |
+| `autoapply status` | Table of tracked applications (`--status SUBMITTED`, `--company`, `--since`, `--until`, `--search`, `--needs-action`, `--limit`). |
+| `autoapply export --out data/applications.csv` | Export the tracker to CSV. |
+| `autoapply dashboard` | Legacy Streamlit view (prefer `autoapply web`). |
 | `autoapply check` | Validate profile placeholders, resume, API key, browser. |
 | `autoapply extract-resume` | Regenerate `resume/resume.txt` from the PDF. |
 
@@ -187,18 +243,15 @@ typed answer never submits anything by itself.
 
 If a CAPTCHA appears, review mode pauses so you can solve it in the browser.
 
-### Statuses
+### Application states
 
-| Status | Meaning |
-|---|---|
-| `applied` | Submitted and a confirmation page was detected (screenshot saved). |
-| `failed` | Navigation/handler error or no confirmation after submit (screenshot saved). |
-| `needs_manual` | Stopped on purpose: unanswerable required question, CAPTCHA in auto mode, Workday without credentials, unknown ATS without a form, or you chose to finish it yourself. Unanswered questions are stored. |
-| `skipped` | You declined in review mode. |
-| `dry_run` | Filled but never submitted. Dry-run records don't stop the listing from being attempted later. |
-
-Listings that already have any record other than `dry_run` are skipped on later runs
-(use `--retry` to reconsider `failed` / `needs_manual` / `skipped`).
+`DISCOVERED → READY_TO_APPLY → APPLYING ⇄ NEEDS_INPUT → SUBMITTED → CONFIRMATION_RECEIVED →
+ASSESSMENT → INTERVIEW → FINAL_INTERVIEW → OFFER`, plus `REJECTED`, `WITHDRAWN`, `FAILED`,
+`UNKNOWN`. Transitions are explicit (`tracker/states.py`); a late confirmation email never
+moves an application backwards and a rejected one is not revived by an old email. Jobs are
+de-duplicated by normalised URL, external job id, and company + title + location, so the
+same posting seen on two boards is one job. Failed / needs-input applications can be
+retried from the detail page; the run resumes on the same application record.
 
 ---
 
@@ -236,7 +289,7 @@ After every value is typed it is read back; a value that did not stick is report
 needing you rather than assumed. The result is that every field ends in exactly one bucket:
 `filled`, `needs approval` (draft), `NEEDS YOU`, or `n/a` (cover-letter upload, password).
 
-## 5. Voice answering
+## 5. CLI voice answering (legacy)
 
 ```bash
 autoapply run --voice            # review mode + voice
@@ -295,13 +348,19 @@ src/autoapply/
   planner.py      decision engine: profile rules, then one batched LLM call
   fields.py       label → profile mapping rules and option matching
   llm.py          Anthropic-backed inference (answer / draft / ask_user) + company research
-  resolve.py      conversational flow for questions that need you (voice or typed)
-  voice.py        text-to-speech, microphone recording, speech-to-text backends
+  interaction.py  how the runner asks a human (terminal implementation)
+  tracker/        state machine, SQLite store, dedupe, legacy migration
+  web/            FastAPI app, AutoApply session orchestrator, SSE bus, static SPA
+  dictation.py    transcript clean-up with vocabulary correction and a no-invention guard
+  mail/           Gmail OAuth/fetch, classification + extraction, matching, deadlines, monitor
+  resolve.py      CLI conversational flow (legacy --voice)
+  voice.py        CLI text-to-speech / microphone / whisper backends
   db.py           SQLite layer
   report.py       terminal tables
   dashboard.py    Streamlit app
-tests/            parser, ATS detection, database, field mapping, classification,
-                  planner (fake LLM) and voice-resolution (fake mic/TTS) tests
+tests/            listings, ATS detection, fields, classification, planner (fake LLM),
+                  tracker state machine / store / migration / dedupe, email classification /
+                  matching / deadlines / processing, dictation guard, API smoke tests
 ```
 
 Run the tests:
@@ -323,8 +382,12 @@ pytest
   review mode's `e` to pick it yourself.
 * **Nothing matches** – `autoapply listings` shows what passes your filters and why
   candidates are excluded (already in DB, ATS not allowed).
-* **Voice: "Microphone unavailable"** – install the extras (`pip install -e ".[voice]"`);
-  on macOS grant the terminal microphone permission (System Settings → Privacy & Security
-  → Microphone). The first run downloads the whisper model.
+* **Mic button does nothing / "network" error** – browser speech recognition needs
+  Chrome, Edge or Safari with microphone permission for `http://127.0.0.1`. Firefox falls
+  back to server transcription, which needs the voice extras (`pip install -e ".[voice]"`).
+* **Gmail "client file missing"** – create the Desktop OAuth client (Setup step 5).
+* **Emails matched to the wrong application** – low-confidence matches are never
+  auto-linked; confirm or ignore them under Settings → Email. Wrong auto-links can be
+  changed on the application's Emails tab via the API (`POST /api/email/events/{id}/link`).
 * **Too many questions asked** – add the fact to `profile.yaml` (e.g. `citizenship`,
   `transgender`, `how_did_you_hear`) and it will be filled next time.
