@@ -37,6 +37,21 @@ Discover (SimplifyJobs listings.json) → filter → open in Playwright → fill
   Uncertain words are highlighted with "Did you mean …?" chips. The clean-up may only edit
   what you said: a guard rejects any result that adds content. Any system-wide dictation
   tool (e.g. Wispr Flow) also works: dictate into the answer box, then press "Clean up".
+* **US jobs only (hard rule).** Every listing passes an eligibility gate *before* the browser
+  opens: US location → target role → configured criteria → not a duplicate / already applied
+  → supported platform. The location validator understands "Boston, MA", state names,
+  well-known US cities, "Remote - US", "Remote in USA", territories, and rejects other
+  countries, Canadian provinces, country-level mixes ("United States / Canada", "US / UK")
+  and bare "Remote" (unknown → never auto-applied). Several specific US offices listed next
+  to international ones count as US. The AutoApply preview shows every skipped listing with
+  its reason. `filters.us_only` in settings.yaml is `true`; it is only ever relaxed explicitly.
+* **Platform answer profiles.** Settings → Application platforms has a tab per ATS (Workday,
+  Greenhouse, Lever, Ashby, SmartRecruiters, Other). Each shows the canonical fields with the
+  profile default and a platform-only override, plus every question that platform has
+  actually asked (recorded from real applications) with an answer box. Configured answers win
+  over `profile.yaml` on that platform and never go to the LLM. Confirming an answer during a
+  session with "Remember for this platform" checked stores it (`config/platforms.yaml`).
+  Workday accounts stay in `.env` (`WORKDAY_ACCOUNTS`).
 * **Email intelligence** (Gmail, read-only): rule + LLM classification, structured
   extraction (company, role, platform, deadline, action), multi-signal matching with
   confidence (auto-link ≥ 0.8, ask you 0.5–0.8, ignore below), deadline parsing to real
@@ -349,6 +364,9 @@ src/autoapply/
   fields.py       label → profile mapping rules and option matching
   llm.py          Anthropic-backed inference (answer / draft / ask_user) + company research
   interaction.py  how the runner asks a human (terminal implementation)
+  location.py     US location validation (states, cities, remote-US, non-US countries/provinces)
+  eligibility.py  the pre-browser eligibility gate with per-check reasons
+  platforms.py    per-ATS answer profiles (config/platforms.yaml) and the canonical field catalogue
   tracker/        state machine, SQLite store, dedupe, legacy migration
   web/            FastAPI app, AutoApply session orchestrator, SSE bus, static SPA
   dictation.py    transcript clean-up with vocabulary correction and a no-invention guard

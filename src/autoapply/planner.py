@@ -63,10 +63,12 @@ class Decision:
 
 
 class Planner:
-    def __init__(self, profile: Profile, llm: QuestionAnswerer, job: JobContext | None = None):
+    def __init__(self, profile: Profile, llm: QuestionAnswerer, job: JobContext | None = None, platform: str = "", platforms=None):
         self.profile = profile
         self.llm = llm
         self.job = job
+        self.platform = platform
+        self.platforms = platforms  # PlatformProfiles | None
 
     # ------------------------------------------------------------------ #
 
@@ -82,9 +84,22 @@ class Planner:
             cat = classify(label, q.options, q.kind)
             policy = policy_for(cat)
 
-            # 1. Profile rules (explicit facts).
+            # 0. Platform answer profile: an answer configured for this exact recurring question.
+            if self.platforms and self.platform:
+                configured = self.platforms.answer_for(self.platform, label)
+                if configured:
+                    chosen = self._resolve_with_options("select", "platform", configured, q) if q.options else configured
+                    if chosen is not None:
+                        decisions[q.id] = Decision(q, "filled", chosen, "profile", cat.value, f"{self.platform} answer profile")
+                        continue
+
+            # 1. Profile rules (explicit facts), with platform field overrides winning over profile.yaml.
             rule = match_rule(label)
             rule_value = profile_value(self.profile, rule) if rule else ""
+            if rule and self.platforms and self.platform:
+                override = self.platforms.field_override(self.platform, rule.path)
+                if override:
+                    rule_value = override
             if rule and rule_value:
                 chosen = self._resolve_with_options(rule.kind, rule.path, rule_value, q)
                 if chosen is not None:

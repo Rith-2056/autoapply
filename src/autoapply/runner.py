@@ -17,7 +17,9 @@ from .ats import detect_ats, get_handler_class
 from .ats.base import ApplyContext, FillResult, HandlerError, NeedsManual
 from .browser import captcha_present, launch, screenshot
 from .config import Profile, Secrets, Settings, resolve_path
+from .eligibility import evaluate
 from .interaction import Interaction, SessionCancelled, TerminalInteraction
+from .platforms import PlatformProfiles, normalize_question
 from .listings import Listing, ListingFilters, filter_listings, load_listings, sync_repo
 from .llm import QuestionAnswerer
 from .report import console, print_answers
@@ -49,6 +51,7 @@ class RunOptions:
     exclude_locations: list[str] = field(default_factory=list)
     categories: list[str] = field(default_factory=list)
     listing_ids: list[str] = field(default_factory=list)  # apply to exactly these
+    us_only: bool | None = None  # None = settings default (true)
 
 
 @dataclass
@@ -82,6 +85,8 @@ class Runner:
             max_job_text_chars=int(settings.get("llm.max_job_text_chars", 8000)),
         )
         self.interaction: Interaction = interaction or TerminalInteraction(self._terminal_voice(), self._is_headless())
+        self.platforms = PlatformProfiles()
+        self.excluded: list[dict[str, Any]] = []  # listings rejected by the eligibility gate (with reasons)
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -141,39 +146,26 @@ class Runner:
             matched = [l for l in listings if l.id in wanted or l.url in wanted]
         else:
             matched = filter_listings(listings, self._filters())
-            if self.opts.exclude_locations:
-                ex = [x.lower() for x in self.opts.exclude_locations]
-                matched = [l for l in matched if not any(x in loc.lower() for loc in l.locations for x in ex)]
         allow = set(self.opts.ats_only or s.get("filters.ats_allowlist", []) or [])
+        us_only = self.opts.us_only if self.opts.us_only is not None else bool(s.get("filters.us_only", True))
+        filters = self._filters()
         candidates: list[Listing] = []
-        skipped_db = skipped_ats = 0
+        self.excluded = []
+        by_check: dict[str, int] = {}
         for l in matched:
             if self.opts.company and self.opts.company.lower() not in l.company.lower():
                 continue
-            if self._already_handled(l):
-                skipped_db += 1
-                continue
-            if allow and detect_ats(l.url) not in allow and not self.opts.listing_ids:
-                skipped_ats += 1
-                continue
-            candidates.append(l)
-        stats = {"source": source, "total": len(listings), "matched_filters": len(matched), "already_in_db": skipped_db,
-                 "ats_not_allowed": skipped_ats, "candidates": len(candidates)}
+            gate = evaluate(l, filters, self.tracker, us_only=us_only, retry=self.opts.retry,
+                            ats_allow=allow if not self.opts.listing_ids else None, exclude_locations=self.opts.exclude_locations)
+            if gate.eligible:
+                candidates.append(l)
+            else:
+                by_check[gate.failed] = by_check.get(gate.failed, 0) + 1
+                self.excluded.append({**l.to_dict(), "gate": gate.to_dict()})
+        stats = {"source": source, "total": len(listings), "matched_filters": len(matched), "excluded_by_check": by_check,
+                 "already_in_db": by_check.get("already_applied", 0), "ats_not_allowed": by_check.get("ats_supported", 0),
+                 "not_us": by_check.get("us_location", 0), "candidates": len(candidates), "us_only": us_only}
         return candidates, stats
-
-    def _already_handled(self, l: Listing) -> bool:
-        job = self.tracker.find_duplicate_job(l.company, l.title, l.location, l.url)
-        if not job:
-            return False
-        app = self.tracker.application_for_job(job["id"])
-        if not app:
-            return False
-        status = ApplicationStatus(app["status"])
-        if status in FRESH:
-            return False
-        if self.opts.retry and status in RETRYABLE:
-            return False
-        return True
 
     # ------------------------------------------------------------------ #
     # Run
@@ -248,7 +240,8 @@ class Runner:
             app_id = app["id"]
         res = RunResult(app_id, listing.company, listing.title, "APPLYING")
         shots = self.settings.screenshots_dir
-        ctx = ApplyContext(page=page, profile=self.profile, llm=self.llm, resume_pdf=self.profile.resume_pdf, timeout_ms=int(self.settings.get("run.page_timeout_ms", 45000)))
+        ctx = ApplyContext(page=page, profile=self.profile, llm=self.llm, resume_pdf=self.profile.resume_pdf,
+                           timeout_ms=int(self.settings.get("run.page_timeout_ms", 45000)), platforms=self.platforms)
         cls = get_handler_class(ats)
         handler = cls(ctx, self.secrets.workday_accounts) if ats == "workday" else cls(ctx)
 
@@ -366,9 +359,14 @@ class Runner:
         """Persist every field decision as question + answer rows."""
         existing = {q["field_id"]: q for q in self.tracker.questions(app_id) if q.get("field_id")}
         filled = sum(1 for a in fill.answers if a.status == "filled")
+        app_row = self.tracker.get_application(app_id) or {}
+        platform = app_row.get("ats") or ""
         for a in fill.answers:
             if not a.label:
                 continue
+            if platform and a.kind != "file":
+                self.tracker.record_platform_question(platform, normalize_question(a.label), a.label, a.category, a.kind, None,
+                                                      a.value if a.status == "filled" else "", a.source)
             status = {"filled": "auto", "draft": "pending", "needs_user": "pending", "n/a": "skipped"}.get(a.status, "pending")
             q = existing.get(a.field_id) if a.field_id else None
             if q is None:

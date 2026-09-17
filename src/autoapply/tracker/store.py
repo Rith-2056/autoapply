@@ -165,6 +165,21 @@ CREATE TABLE IF NOT EXISTS email_accounts (
     last_history_id TEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS platform_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    question_key TEXT NOT NULL,
+    question_text TEXT NOT NULL,
+    category TEXT DEFAULT '',
+    kind TEXT DEFAULT 'text',
+    options TEXT DEFAULT '[]',
+    last_value TEXT DEFAULT '',
+    last_source TEXT DEFAULT '',
+    seen INTEGER DEFAULT 1,
+    last_seen TEXT NOT NULL,
+    UNIQUE(platform, question_key)
+);
+
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -555,6 +570,27 @@ class Tracker:
             self._exec("UPDATE notifications SET read=1")
         else:
             self._exec("UPDATE notifications SET read=1 WHERE id=?", (nid,))
+
+    # ------------------------------------------------------------------ #
+    # platform questions (what each ATS actually asks)
+    # ------------------------------------------------------------------ #
+
+    def record_platform_question(self, platform: str, question_key: str, question_text: str, category: str = "", kind: str = "text",
+                                 options: list[str] | None = None, value: str = "", source: str = "") -> None:
+        if not platform or not question_key:
+            return
+        self._exec(
+            """INSERT INTO platform_questions (platform, question_key, question_text, category, kind, options, last_value, last_source, seen, last_seen)
+               VALUES (?,?,?,?,?,?,?,?,1,?)
+               ON CONFLICT(platform, question_key) DO UPDATE SET seen=seen+1, last_seen=excluded.last_seen,
+                 last_value=CASE WHEN excluded.last_value!='' THEN excluded.last_value ELSE last_value END,
+                 last_source=CASE WHEN excluded.last_value!='' THEN excluded.last_source ELSE last_source END,
+                 options=CASE WHEN excluded.options!='[]' THEN excluded.options ELSE options END""",
+            (platform, question_key, question_text[:500], category, kind, json.dumps(options or []), value[:2000], source, now_iso()),
+        )
+
+    def platform_questions(self, platform: str) -> list[dict[str, Any]]:
+        return self._all("SELECT * FROM platform_questions WHERE platform=? ORDER BY seen DESC, last_seen DESC", (platform,))
 
     # ------------------------------------------------------------------ #
     # autoapply sessions

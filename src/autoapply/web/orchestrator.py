@@ -158,9 +158,20 @@ class WebInteraction:
                 self.tracker.add_answer(qrow["id"], value, cmd.get("source", "typed"), raw=cmd.get("raw", ""), cleaned=cmd.get("cleaned", ""),
                                         confidence=cmd.get("confidence", ""), ai_modified=bool(cmd.get("ai_modified")), user_approved=True)
             self.tracker.record_event(app_id, EventType.ANSWER_PROVIDED, f"Answered: {pending.label[:80]}", {"field_id": fid, "source": cmd.get("source", "typed")}, enforce=False)
+            app = self.tracker.get_application(app_id) or {}
             if cmd.get("save_reusable") and len(value) > 40:
-                app = self.tracker.get_application(app_id) or {}
                 self.tracker.save_approved_answer(pending.label, value, app.get("company", ""))
+            if cmd.get("remember_platform") and app.get("ats"):
+                try:
+                    from ..platforms import PlatformProfiles
+
+                    PlatformProfiles().set_answer(app["ats"], pending.label, value)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("could not store platform answer: %s", e)
+            if app.get("ats"):
+                from ..platforms import normalize_question
+
+                self.tracker.record_platform_question(app["ats"], normalize_question(pending.label), pending.label, pending.category, pending.kind, pending.options, value, cmd.get("source", "typed"))
         self.bus.publish({"kind": "answer_result", "application_id": app_id, "field_id": fid, "ok": ok, "message": msg})
         self._set_waiting(self._pending_payload(app_id, fill))
 
@@ -259,6 +270,7 @@ class SessionManager:
             exclude_locations=list(config.get("excluded_locations", []) or []),
             categories=list(config.get("categories", []) or []),
             listing_ids=list(config.get("listing_ids", []) or []),
+            us_only=None if config.get("us_only") is None else bool(config.get("us_only")),
         )
         interaction = WebInteraction(state, self.tracker, self.bus)
         counters = {"attempted": 0, "submitted": 0}

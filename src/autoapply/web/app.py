@@ -24,6 +24,7 @@ from ..config import CONFIG_DIR, PROJECT_ROOT, Profile, load_profile, load_secre
 from ..dictation import DictationContext, TranscriptCleaner
 from ..mail.classify import EmailClassifier
 from ..mail.monitor import EmailMonitor, EmailProcessor
+from ..platforms import PLATFORMS, PlatformProfiles
 from ..tracker import ApplicationStatus, Tracker
 from ..tracker.migrate import migrate_legacy
 from ..tracker.states import STATUS_LABELS
@@ -70,6 +71,11 @@ class ActionCreate(BaseModel):
 
 class LinkBody(BaseModel):
     application_id: int | None = None
+
+
+class PlatformPatch(BaseModel):
+    fields: dict[str, Any] | None = None
+    answers: dict[str, Any] | None = None
 
 
 class CleanBody(BaseModel):
@@ -287,19 +293,53 @@ def create_app(state: AppState | None = None) -> FastAPI:
         return _control(session_id, lambda sid: st.sessions.command(sid, cmd))
 
     @app.get("/api/listings/preview")
-    def listings_preview(target_roles: str = "", locations: str = "", categories: str = "", excluded_companies: str = "", limit: int = 25) -> dict[str, Any]:
+    def listings_preview(target_roles: str = "", locations: str = "", categories: str = "", excluded_companies: str = "",
+                         excluded_locations: str = "", retry: bool = False, limit: int = 25) -> dict[str, Any]:
         from ..runner import RunOptions, Runner
 
-        opts = RunOptions(no_sync=True, title_keywords=[x.strip() for x in target_roles.split(",") if x.strip()],
-                          locations=[x.strip() for x in locations.split(",") if x.strip()],
-                          categories=[x.strip() for x in categories.split(",") if x.strip()],
-                          exclude_companies=[x.strip() for x in excluded_companies.split(",") if x.strip()])
+        split = lambda v: [x.strip() for x in v.split(",") if x.strip()]  # noqa: E731
+        opts = RunOptions(no_sync=True, title_keywords=split(target_roles), locations=split(locations), categories=split(categories),
+                          exclude_companies=split(excluded_companies), exclude_locations=split(excluded_locations), retry=retry)
         try:
             runner = Runner(st.settings, load_profile(), st.secrets, st.tracker, opts)
             cands, stats = runner.collect_candidates()
         except FileNotFoundError:
-            return {"stats": {"error": "listings not synced yet; start a session to clone the repo"}, "listings": []}
-        return {"stats": stats, "listings": [c.to_dict() for c in cands[:limit]]}
+            return {"stats": {"error": "listings not synced yet; start a session to clone the repo"}, "listings": [], "excluded": []}
+        from ..location import classify_location
+
+        rows = []
+        for c in cands[:limit]:
+            d = c.to_dict()
+            d["location_verdict"] = classify_location(c.locations).verdict
+            rows.append(d)
+        return {"stats": stats, "listings": rows,
+                "excluded": [{"company": e["company"], "title": e["title"], "locations": e["locations"], "reason": e["gate"]["reason"], "failed": e["gate"]["failed"]} for e in runner.excluded[:limit]]}
+
+    # ------------------------------------------------------------------ #
+    # Application platforms (Workday, Greenhouse, ...)
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/platforms")
+    def platforms() -> dict[str, Any]:
+        pp = PlatformProfiles()
+        profile = load_profile()
+        out = {}
+        for name in PLATFORMS:
+            out[name] = {"fields": pp.effective_fields(name, profile), "answers": pp.data.get(name, {}).get("answers", {}),
+                         "questions_seen": st.tracker.platform_questions(name)}
+        return {"platforms": out, "workday_accounts": sorted(st.secrets.workday_accounts.keys())}
+
+    @app.patch("/api/platforms/{name}")
+    def patch_platform(name: str, body: PlatformPatch) -> dict[str, Any]:
+        if name not in PLATFORMS:
+            raise HTTPException(404, f"unknown platform; one of {PLATFORMS}")
+        pp = PlatformProfiles()
+        if body.fields is not None:
+            pp.set_fields(name, {k: ("" if v is None else str(v)) for k, v in body.fields.items()})
+        if body.answers is not None:
+            for q, a in body.answers.items():
+                pp.set_answer(name, q, "" if a is None else str(a))
+        return platforms()["platforms"][name]
 
     # ------------------------------------------------------------------ #
     # Actions / notifications

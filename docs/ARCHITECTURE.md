@@ -74,3 +74,19 @@ On first start of the web app: if `data/applications.db` exists and the tracker 
 ## 11. Phases
 
 1 audit (this document) · 2 tracker + migration · 3 web backend + SPA · 4 AutoApply integration (WebInteraction, sessions, live events) · 5 voice redesign · 6 email · 7 actions/deadlines/notifications · 8 reliability (retry/resume, error states) · 9 polish.
+
+## 12. Additions (P0 67–72)
+
+* **US-only gate** (`location.py`, `eligibility.py`): runs on listing data before any browser
+  automation; verdict US / NON_US / MIXED / UNKNOWN; only US and MIXED-with-a-specific-US-office
+  are eligible. Audit on the live SimplifyJobs data: 1115 US, 109 non-US, 6 mixed, 0 unknown.
+* **Eligibility gate order**: us_location → excluded_location → configured_criteria
+  (term, category, title keywords, exclusions, sponsorship, degree) → already_applied
+  (tracker dedupe by URL / job id / company+title+location; retry re-admits FAILED /
+  NEEDS_INPUT / WITHDRAWN) → ats_supported. The first failing check is the headline reason
+  shown in the AutoApply preview.
+* **Platform answer profiles** (`platforms.py`, `config/platforms.yaml`, tracker table
+  `platform_questions`): per-ATS field overrides keyed by profile path and per-question
+  answers; the planner consults them before profile rules and before the LLM; every question
+  a platform asks is recorded so the Settings page is driven by real forms, not a hard-coded
+  list. Answers confirmed in a session can be remembered per platform.

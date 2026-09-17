@@ -8,6 +8,9 @@ listings:
   term: "Summer 2027"
 
 filters:
+  # Hard requirement: only apply to jobs located in the United States (state/city/"Remote - US").
+  # Jobs whose location is another country, a country-level mix ("US / Canada") or unknown are skipped.
+  us_only: true
   # Listing categories to include. Valid values in listings.json:
   #   Software, AI/ML/Data, Quant, Hardware, Product
   categories: [Software, "AI/ML/Data", Quant]

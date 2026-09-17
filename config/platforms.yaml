@@ -1,0 +1,20 @@
+# Platform-specific answers. fields: override profile.yaml paths on that platform.
+# answers: exact recurring question -> answer. Edited from Settings → Application platforms.
+workday:
+  fields: {}
+  answers: {}
+greenhouse:
+  fields: {}
+  answers: {}
+lever:
+  fields: {}
+  answers: {}
+ashby:
+  fields: {}
+  answers: {}
+smartrecruiters:
+  fields: {}
+  answers: {}
+generic:
+  fields: {}
+  answers: {}

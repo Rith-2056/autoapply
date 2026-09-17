@@ -75,3 +75,18 @@ def test_voice_clean_and_session_controls(client):
     s = c.get("/api/settings").json()
     assert "filters" in s and "has_anthropic_key" in s and "ANTHROPIC" not in str(s)
     assert c.get("/").status_code == 200 and "AutoApplier" in c.get("/").text
+
+
+def test_platforms_endpoints(client, tmp_path, monkeypatch):
+    c, st = client
+    import autoapply.platforms as pl
+    import autoapply.web.app as web
+
+    monkeypatch.setattr(web, "PlatformProfiles", lambda: pl.PlatformProfiles(tmp_path / "platforms.yaml"))
+    d = c.get("/api/platforms").json()
+    assert set(d["platforms"]) >= {"workday", "greenhouse", "lever", "ashby", "smartrecruiters"}
+    assert any(f["path"] == "education.major" for f in d["platforms"]["workday"]["fields"])
+    r = c.patch("/api/platforms/workday", json={"fields": {"education.major": "Computer Science"}, "answers": {"Do you have a Workday account?": "Yes"}}).json()
+    assert next(f for f in r["fields"] if f["path"] == "education.major")["override"] == "Computer Science"
+    assert r["answers"]["Do you have a Workday account?"] == "Yes"
+    assert c.patch("/api/platforms/nope", json={"fields": {}}).status_code == 404

@@ -77,6 +77,7 @@ class ApplyContext:
     llm: QuestionAnswerer
     resume_pdf: Path
     timeout_ms: int = 45000
+    platforms: Any = None  # PlatformProfiles
 
 
 # JavaScript that enumerates visible form controls and tags each with a
@@ -312,7 +313,7 @@ class BaseHandler:
             except Exception as e:  # noqa: BLE001
                 log.warning("Field %r: %s", f.get("label"), e)
 
-        planner = Planner(self.profile, self.llm, self.job_context())
+        planner = Planner(self.profile, self.llm, self.job_context(), platform=self.name, platforms=self.ctx.platforms)
         decisions = planner.plan(questions)
         for d in decisions:
             self._apply_decision(d, result)
